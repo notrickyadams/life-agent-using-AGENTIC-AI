@@ -138,11 +138,14 @@ def finish_run(
     calendar_ok: bool | None = None,
     classroom_ok: bool | None = None,
     claude_calls_made: int = 0,
+    plan_items: int | None = None,
     error: str | None = None,
 ) -> None:
     """Mark a run as finished and record how each part went.
 
     Booleans are stored as 1/0; None stays NULL meaning "not attempted".
+    plan_items is how many items the day plan held - 0 is a real answer,
+    NULL means the plan stage did not run.
     """
     def _flag(value: bool | None) -> int | None:
         return None if value is None else int(value)
@@ -151,10 +154,11 @@ def finish_run(
         """
         UPDATE runs
         SET finished_at = ?, calendar_ok = ?, classroom_ok = ?,
-            claude_calls_made = ?, error = ?
+            claude_calls_made = ?, plan_items = ?, error = ?
         WHERE run_id = ?
         """,
-        (utc_now_iso(), _flag(calendar_ok), _flag(classroom_ok), claude_calls_made, error, run_id),
+        (utc_now_iso(), _flag(calendar_ok), _flag(classroom_ok), claude_calls_made,
+         plan_items, error, run_id),
     )
     conn.commit()
 

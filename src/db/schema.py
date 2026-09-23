@@ -99,6 +99,16 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 """
 
+# Columns added after the first version of a table shipped. CREATE TABLE IF
+# NOT EXISTS will not add a column to a table that already exists, and the
+# database now holds history worth keeping, so it cannot simply be deleted
+# and recreated. Each entry is (table, column, SQL type + default).
+MIGRATIONS = [
+    # Step 2c: how many items the day plan held. 0 is a real answer
+    # ("nothing on today"), NULL means the plan stage did not run.
+    ("runs", "plan_items", "INTEGER"),
+]
+
 
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
     """Open the SQLite database and return a connection.
@@ -115,10 +125,38 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
-def init_db(conn: sqlite3.Connection) -> None:
-    """Create any missing tables and indexes. Safe to call every run."""
+def column_names(conn: sqlite3.Connection, table: str) -> list[str]:
+    """The column names of one table."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return [row["name"] for row in rows]
+
+
+def apply_migrations(conn: sqlite3.Connection) -> list[str]:
+    """Add any columns listed in MIGRATIONS that are not there yet.
+
+    Existing rows get NULL for the new column, which is why every migrated
+    column has to be nullable. Returns the names of what was added, so a run
+    that changes the shape of the database says so in the log rather than
+    doing it silently.
+    """
+    added: list[str] = []
+    for table, column, sql_type in MIGRATIONS:
+        if column not in column_names(conn, table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+            added.append(f"{table}.{column}")
+    if added:
+        conn.commit()
+    return added
+
+
+def init_db(conn: sqlite3.Connection) -> list[str]:
+    """Create any missing tables and indexes, then apply column migrations.
+
+    Safe to call every run. Returns any columns that were added.
+    """
     conn.executescript(SCHEMA_SQL)
     conn.commit()
+    return apply_migrations(conn)
 
 
 def table_names(conn: sqlite3.Connection) -> list[str]:
