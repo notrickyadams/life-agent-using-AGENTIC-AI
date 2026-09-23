@@ -318,3 +318,90 @@ def test_removing_a_keyword_removes_its_tag(db):
     write_rule_tags(db, build_plan(db, no_keywords, TODAY))
 
     assert queries.get_tags(db, "classroom:c/1") == []
+
+
+# --- data freshness ---------------------------------------------------------
+
+def test_describe_age_reads_naturally():
+    from src.rhythm.today import describe_age
+
+    assert describe_age(None) == "never synced"
+    assert describe_age(5) == "just now"
+    assert describe_age(200) == "3 minutes ago"
+    assert describe_age(60 * 60 * 8) == "8 hours ago"
+    assert describe_age(60 * 60 * 50) == "2 days ago"
+
+
+def test_plan_records_how_old_the_data_is(db):
+    from src.db import queries
+
+    # A successful run is what makes the data "fresh" - not whether it wrote rows.
+    run_id = queries.start_run(db)
+    queries.finish_run(db, run_id, calendar_ok=True, classroom_ok=True)
+
+    plan = build_plan(db, make_rhythm(), TODAY)
+
+    assert plan.data_age_seconds is not None
+    assert plan.data_age_seconds < 60
+
+
+def test_a_sync_that_found_nothing_still_counts_as_fresh(db):
+    """Unenrolling from every course is a valid empty result, not stale data."""
+    from src.db import queries
+
+    run_id = queries.start_run(db)
+    queries.finish_run(db, run_id, calendar_ok=True, classroom_ok=True)
+
+    assert queries.count_events(db) == 0                  # nothing was written
+    assert build_plan(db, make_rhythm(), TODAY).data_age_seconds < 60
+
+
+def test_a_failed_sync_does_not_refresh_the_clock(db):
+    from src.db import queries
+
+    run_id = queries.start_run(db)
+    queries.finish_run(db, run_id, calendar_ok=False, classroom_ok=False, error="offline")
+
+    # No source succeeded, so there is no successful sync to report.
+    assert queries.last_successful_sync(db, "calendar") is None
+    assert build_plan(db, make_rhythm(), TODAY).data_age_seconds is None
+
+
+def test_one_stale_source_is_not_hidden_by_a_fresh_one(db):
+    from src.db import queries
+
+    # An old run where both worked...
+    old = queries.start_run(db)
+    queries.finish_run(db, old, calendar_ok=True, classroom_ok=True)
+    # finish_run stamps the real current time, so age the row by hand to
+    # simulate a run that happened weeks ago.
+    db.execute("UPDATE runs SET finished_at = '2026-09-01T00:00:00Z' WHERE run_id = ?", (old,))
+    db.commit()
+
+    # ...then a recent one where only calendar succeeded.
+    new = queries.start_run(db)
+    queries.finish_run(db, new, calendar_ok=True, classroom_ok=False, error="offline")
+
+    # Calendar is fresh, classroom is weeks old. The age must reflect
+    # classroom - the OLDER of the two - so one stale source is never
+    # hidden behind a fresh one.
+    assert queries.last_successful_sync(db, "classroom") == "2026-09-01T00:00:00Z"
+    assert queries.data_age_seconds(db) > 60 * 60 * 24
+
+
+def test_stale_data_is_called_out_in_the_output(db):
+    from src.rhythm.today import STALE_AFTER_SECONDS
+
+    plan = build_plan(db, make_rhythm(), TODAY)
+    plan.data_age_seconds = STALE_AFTER_SECONDS + 1
+
+    assert "STALE" in format_plan(plan)
+
+
+def test_fresh_data_is_not_called_out(db):
+    plan = build_plan(db, make_rhythm(), TODAY)
+    plan.data_age_seconds = 30
+
+    text = format_plan(plan)
+    assert "STALE" not in text
+    assert "just now" in text

@@ -20,9 +20,13 @@ Rules applied before any of that:
     assignment is itself present, so a due date is not listed twice. The
     Classroom row wins because it carries the submission state.
 
-Try it against any date, including past ones:
-    python -m src.rhythm.today
-    python -m src.rhythm.today --date 2026-05-20
+By default this syncs from Google first, so what you see is what Google has
+right now - not what it had the last time something ran. Every plan also
+states how old its data is, and says so loudly when that is stale.
+
+    python -m src.rhythm.today                    sync, then show today
+    python -m src.rhythm.today --no-sync          show what is stored, no network
+    python -m src.rhythm.today --date 2026-05-20  plan a specific date
 """
 
 import argparse
@@ -109,6 +113,12 @@ class DayPlan:
     due_soon: list[Item] = field(default_factory=list)
     themed: list[Item] = field(default_factory=list)
 
+    # How old the underlying Google data is, in seconds, at the moment the
+    # plan was built. None means nothing has ever synced. Carried on the plan
+    # so every surface that shows a plan - terminal now, Notion in step 3 -
+    # can say how current it is, instead of quietly implying "just now".
+    data_age_seconds: float | None = None
+
     @property
     def is_empty(self) -> bool:
         """True when there is genuinely nothing to show."""
@@ -122,6 +132,25 @@ class DayPlan:
     def all_items(self) -> list[Item]:
         """Every item in the plan, in section order."""
         return [*self.overdue, *self.today, *self.due_soon, *self.themed]
+
+
+# Data older than this is called out rather than shown as if it were current.
+STALE_AFTER_SECONDS = 60 * 60 * 6   # six hours
+
+
+def describe_age(seconds: float | None) -> str:
+    """Turn a data age into something readable, e.g. '3 minutes ago'."""
+    if seconds is None:
+        return "never synced"
+    if seconds < 90:
+        return "just now"
+    minutes = seconds / 60
+    if minutes < 90:
+        return f"{round(minutes)} minutes ago"
+    hours = minutes / 60
+    if hours < 36:
+        return f"{round(hours)} hours ago"
+    return f"{round(hours / 24)} days ago"
 
 
 def to_local_parts(due_at: str | None, all_day: bool, rhythm: Rhythm) -> tuple[date | None, str | None]:
@@ -209,11 +238,13 @@ def build_plan(conn, rhythm: Rhythm, on: date | None = None) -> DayPlan:
 
     Nothing is written to the database here - see write_rule_tags() for that.
     """
+    from src.db import queries
+
     on = on or rhythm.local_today()
     day = rhythm.day_for(on)
     horizon = on + timedelta(days=rhythm.due_soon_days)
 
-    plan = DayPlan(on=on, day=day)
+    plan = DayPlan(on=on, day=day, data_age_seconds=queries.data_age_seconds(conn))
 
     for item in load_items(conn, rhythm):
         item.matched_keywords = tuple(day.matches(item.title, item.course_name))
@@ -281,6 +312,13 @@ def format_plan(plan: DayPlan) -> str:
     lines.append(heading)
     lines.append("=" * len(heading))
 
+    age = plan.data_age_seconds
+    freshness = f"Google data: {describe_age(age)}"
+    if age is None or age > STALE_AFTER_SECONDS:
+        freshness += "   <-- STALE. Run: python -m src.run_daily"
+    lines.append(freshness)
+    lines.append("")
+
     if plan.day.focus:
         lines.append(f"focus: {plan.day.focus}")
         lines.append("")
@@ -308,8 +346,12 @@ def format_plan(plan: DayPlan) -> str:
 
 
 def _main() -> int:
-    parser = argparse.ArgumentParser(description="Show the day plan (no AI, nothing written)")
+    parser = argparse.ArgumentParser(
+        description="Show the day plan. Syncs from Google first so what you see is current."
+    )
     parser.add_argument("--date", help="plan for a specific date, e.g. 2026-05-20 (default: today)")
+    parser.add_argument("--no-sync", action="store_true",
+                        help="skip the Google sync and use whatever is already stored (offline / fast)")
     parser.add_argument("--write-tags", action="store_true", help="also store keyword matches in the tags table")
     args = parser.parse_args()
 
@@ -334,6 +376,19 @@ def _main() -> int:
     conn = schema.connect()
     schema.init_db(conn)
     try:
+        if not args.no_sync:
+            # Sync first, so the plan reflects Google as it is right now
+            # rather than as it was the last time anything ran. A source that
+            # fails is reported and the plan is still built from what is
+            # stored - a slightly old plan beats no plan.
+            from src.run_daily import COLLECTORS, run_pipeline
+
+            results = run_pipeline(conn, COLLECTORS)
+            results.pop("_plan", None)
+            for name, outcome in results.items():
+                if not outcome.get("ok"):
+                    print(f"warning: {name} did not sync ({outcome.get('error')})")
+
         plan = build_plan(conn, rhythm, on)
         print(format_plan(plan))
         if args.write_tags:

@@ -16,6 +16,7 @@ Writing:
 Reading:
   count_events(conn, source=None)
   get_event(conn, event_id)
+  last_successful_sync(conn, source) / data_age_seconds(conn)  how fresh is the data
   get_latest_run(conn)
 """
 
@@ -221,6 +222,42 @@ def count_events(conn: sqlite3.Connection, source: str | None = None) -> int:
 def get_event(conn: sqlite3.Connection, event_id: str) -> sqlite3.Row | None:
     """Fetch one event by id, or None if it isn't there."""
     return conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+
+
+# runs columns that record whether each source succeeded.
+_OK_COLUMN = {"calendar": "calendar_ok", "classroom": "classroom_ok"}
+
+
+def last_successful_sync(conn: sqlite3.Connection, source: str) -> str | None:
+    """When this source last synced successfully, as a UTC ISO string.
+
+    Read from the runs table, not from events.last_synced_at: a sync that
+    correctly finds nothing (every course unenrolled, say) writes no rows,
+    so events would wrongly look stale. What matters is that the sync ran
+    and succeeded, not that it happened to write something.
+    """
+    column = _OK_COLUMN.get(source)
+    if column is None:
+        raise ValueError(f"unknown source {source!r}")
+    row = conn.execute(
+        f"SELECT MAX(finished_at) AS at FROM runs WHERE {column} = 1 AND finished_at IS NOT NULL"
+    ).fetchone()
+    return row["at"]
+
+
+def data_age_seconds(conn: sqlite3.Connection) -> float | None:
+    """How many seconds since the OLDEST of the sources last synced.
+
+    Uses the oldest so that one stale source is not hidden by a fresh one.
+    None when nothing has ever synced.
+    """
+    stamps = [last_successful_sync(conn, s) for s in ("calendar", "classroom")]
+    stamps = [s for s in stamps if s]
+    if not stamps:
+        return None
+    oldest = min(stamps)
+    then = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+    return (datetime.now(timezone.utc) - then).total_seconds()
 
 
 def get_latest_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
