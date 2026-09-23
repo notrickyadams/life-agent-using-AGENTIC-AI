@@ -332,12 +332,28 @@ def test_describe_age_reads_naturally():
     assert describe_age(60 * 60 * 50) == "2 days ago"
 
 
-def test_plan_records_how_old_the_data_is(db):
+def _mark_synced(db, *sources, at: str | None = None):
+    """Record that the given sources synced successfully, optionally back-dated.
+
+    Freshness comes from a per-source stamp written the moment that source
+    succeeds - NOT from the run finishing, which happens after the plan is
+    built. Tests must use the same mechanism the real code does.
+    """
     from src.db import queries
 
-    # A successful run is what makes the data "fresh" - not whether it wrote rows.
     run_id = queries.start_run(db)
-    queries.finish_run(db, run_id, calendar_ok=True, classroom_ok=True)
+    for source in sources:
+        queries.record_source_synced(db, run_id, source)
+    if at:
+        for source in sources:
+            column = queries._SYNCED_COLUMN[source]
+            db.execute(f"UPDATE runs SET {column} = ? WHERE run_id = ?", (at, run_id))
+        db.commit()
+    return run_id
+
+
+def test_plan_records_how_old_the_data_is(db):
+    _mark_synced(db, "calendar", "classroom")
 
     plan = build_plan(db, make_rhythm(), TODAY)
 
@@ -347,10 +363,7 @@ def test_plan_records_how_old_the_data_is(db):
 
 def test_a_sync_that_found_nothing_still_counts_as_fresh(db):
     """Unenrolling from every course is a valid empty result, not stale data."""
-    from src.db import queries
-
-    run_id = queries.start_run(db)
-    queries.finish_run(db, run_id, calendar_ok=True, classroom_ok=True)
+    _mark_synced(db, "calendar", "classroom")
 
     assert queries.count_events(db) == 0                  # nothing was written
     assert build_plan(db, make_rhythm(), TODAY).data_age_seconds < 60
@@ -359,8 +372,8 @@ def test_a_sync_that_found_nothing_still_counts_as_fresh(db):
 def test_a_failed_sync_does_not_refresh_the_clock(db):
     from src.db import queries
 
-    run_id = queries.start_run(db)
-    queries.finish_run(db, run_id, calendar_ok=False, classroom_ok=False, error="offline")
+    # A run that started but where no source succeeded stamps nothing.
+    queries.start_run(db)
 
     # No source succeeded, so there is no successful sync to report.
     assert queries.last_successful_sync(db, "calendar") is None
@@ -370,17 +383,10 @@ def test_a_failed_sync_does_not_refresh_the_clock(db):
 def test_one_stale_source_is_not_hidden_by_a_fresh_one(db):
     from src.db import queries
 
-    # An old run where both worked...
-    old = queries.start_run(db)
-    queries.finish_run(db, old, calendar_ok=True, classroom_ok=True)
-    # finish_run stamps the real current time, so age the row by hand to
-    # simulate a run that happened weeks ago.
-    db.execute("UPDATE runs SET finished_at = '2026-09-01T00:00:00Z' WHERE run_id = ?", (old,))
-    db.commit()
-
+    # An old run where both sources synced, weeks ago...
+    _mark_synced(db, "calendar", "classroom", at="2026-09-01T00:00:00Z")
     # ...then a recent one where only calendar succeeded.
-    new = queries.start_run(db)
-    queries.finish_run(db, new, calendar_ok=True, classroom_ok=False, error="offline")
+    _mark_synced(db, "calendar")
 
     # Calendar is fresh, classroom is weeks old. The age must reflect
     # classroom - the OLDER of the two - so one stale source is never
@@ -405,3 +411,159 @@ def test_fresh_data_is_not_called_out(db):
     text = format_plan(plan)
     assert "STALE" not in text
     assert "just now" in text
+
+
+# --- multi-day events (regression: these used to vanish) --------------------
+
+def test_a_multi_day_event_shows_on_every_day_it_spans(db):
+    """A conference that started on Monday is still on come Wednesday."""
+    rhythm = make_rhythm()
+    add_event(db, "calendar:trip", title="Conference",
+              due_at="2026-09-20", end_at="2026-09-27", all_day=1)
+
+    for day in (20, 21, 23, 26):
+        plan = build_plan(db, rhythm, date(2026, 9, day))
+        assert [i.title for i in plan.today] == ["Conference"], f"missing on Sep {day}"
+
+    # The 27th is Google's EXCLUSIVE end, so the event does not cover it.
+    assert build_plan(db, rhythm, date(2026, 9, 27)).total == 0
+
+
+def test_a_single_all_day_event_does_not_leak_into_the_next_day(db):
+    """Google gives a one-day event an end date of the NEXT day."""
+    rhythm = make_rhythm()
+    add_event(db, "calendar:one", title="One day",
+              due_at="2026-09-21", end_at="2026-09-22", all_day=1)
+
+    assert [i.title for i in build_plan(db, rhythm, TODAY).today] == ["One day"]
+    assert build_plan(db, rhythm, date(2026, 9, 22)).total == 0
+
+
+def test_a_multi_day_timed_event_spans_its_days(db):
+    rhythm = make_rhythm()
+    add_event(db, "calendar:long", title="Long session",
+              due_at="2026-09-20T08:00:00Z", end_at="2026-09-22T17:00:00Z")
+
+    assert [i.title for i in build_plan(db, rhythm, TODAY).today] == ["Long session"]
+
+
+# --- deadlines that have already passed today -------------------------------
+
+def _rhythm_at(hour: int, minute: int = 0, **overrides):
+    """A rhythm whose 'now' is fixed, so time-of-day rules are testable."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    base = make_rhythm(**overrides)
+
+    class FixedNow(Rhythm):
+        def local_now(self):
+            return datetime(2026, 9, 21, hour, minute, tzinfo=ZoneInfo(CAIRO))
+
+    return FixedNow(timezone=base.timezone, due_soon_days=base.due_soon_days,
+                    show_overdue=base.show_overdue, days=base.days)
+
+
+def test_a_deadline_earlier_today_counts_as_overdue(db):
+    add_event(db, "classroom:c/1", title="Due 09:00", due_at="2026-09-21T06:00:00Z",
+              submission_state="CREATED")
+
+    assert [i.title for i in build_plan(db, _rhythm_at(18), TODAY).overdue] == ["Due 09:00"]
+    # ...but not before the deadline.
+    assert [i.title for i in build_plan(db, _rhythm_at(7), TODAY).today] == ["Due 09:00"]
+
+
+def test_a_passed_deadline_today_is_not_shown_when_overdue_is_off(db):
+    add_event(db, "classroom:c/1", title="Due 09:00", due_at="2026-09-21T06:00:00Z",
+              submission_state="CREATED")
+
+    plan = build_plan(db, _rhythm_at(18, show_overdue=False), TODAY)
+    assert plan.total == 0
+
+
+def test_a_finished_assignment_is_never_overdue_however_late(db):
+    add_event(db, "classroom:c/1", title="Done", due_at="2026-09-21T06:00:00Z",
+              submission_state="TURNED_IN")
+
+    plan = build_plan(db, _rhythm_at(18), TODAY)
+    assert plan.overdue == []
+    assert [i.title for i in plan.today] == ["Done"]
+
+
+def test_a_calendar_event_earlier_today_stays_under_today(db):
+    """An event is attended, not owed - a past lecture is not 'overdue'."""
+    add_event(db, "calendar:lecture", title="Morning lecture",
+              due_at="2026-09-21T06:00:00Z", end_at="2026-09-21T07:30:00Z")
+
+    plan = build_plan(db, _rhythm_at(18), TODAY)
+    assert plan.overdue == []
+    assert [i.title for i in plan.today] == ["Morning lecture"]
+
+
+def test_planning_a_past_or_future_date_ignores_the_clock(db):
+    """There is no 'now' on another day, so a deadline is just part of it."""
+    add_event(db, "classroom:c/1", title="Due 09:00", due_at="2026-09-22T06:00:00Z",
+              submission_state="CREATED")
+
+    plan = build_plan(db, _rhythm_at(18), date(2026, 9, 22))
+    assert [i.title for i in plan.today] == ["Due 09:00"]
+
+
+# --- midnight deadlines -----------------------------------------------------
+
+def test_a_midnight_deadline_states_which_day_it_belongs_to(db):
+    """'00:00' alone is ambiguous between tonight and tomorrow night."""
+    add_event(db, "classroom:c/mid", title="Due midnight", due_at="2026-09-21T21:00:00Z",
+              submission_state="CREATED")   # 00:00 on the 22nd, Cairo
+
+    plan = build_plan(db, make_rhythm(), TODAY)
+
+    assert [i.title for i in plan.due_soon] == ["Due midnight"]
+    assert "Tue 22 Sep 00:00" in plan.due_soon[0].describe(with_date=True)
+    assert "Tue 22 Sep" in format_plan(plan)
+
+
+# --- assignments with no submission record ---------------------------------
+
+def test_an_assignment_with_no_submission_record_still_needs_doing(db):
+    """Google may return no submission row; that is not evidence it is done."""
+    add_event(db, "classroom:c/x", title="No record", due_at="2026-09-18T20:59:00Z",
+              submission_state=None)
+
+    plan = build_plan(db, make_rhythm(), TODAY)
+
+    assert [i.title for i in plan.overdue] == ["No record"]
+    assert "(no submission record)" in plan.overdue[0].label
+
+
+def test_a_calendar_event_is_never_treated_as_owed(db):
+    add_event(db, "calendar:past", title="Old event", due_at="2026-09-18T06:00:00Z")
+
+    assert build_plan(db, make_rhythm(), TODAY).overdue == []
+
+
+# --- themed section must not resurface finished work ------------------------
+
+def test_a_finished_far_off_assignment_is_not_surfaced_by_a_keyword(db):
+    add_event(db, "classroom:c/done", title="Final Exam", due_at="2026-10-30T20:59:00Z",
+              submission_state="TURNED_IN")
+
+    assert build_plan(db, make_rhythm(), TODAY).themed == []
+
+
+# --- mirrors of archived courses -------------------------------------------
+
+def test_a_mirror_is_still_recognised_when_its_course_was_archived(db):
+    """An archived course keeps its calendar; its events must not reappear."""
+    add_event(db, "classroom:844/862", title="Assignment 6", due_at="2026-09-21T20:59:00Z",
+              submission_state="CREATED")
+    add_event(db, "calendar:mirror", title="Assignment 6", due_at="2026-09-21",
+              all_day=1, duplicate_of="classroom:844/862")
+    # The course is archived, so its Classroom row goes inactive - but the
+    # calendar event survives because the calendar still exists.
+    db.execute("UPDATE events SET active = 0 WHERE id = 'classroom:844/862'")
+    db.commit()
+
+    plan = build_plan(db, make_rhythm(), TODAY)
+
+    assert plan.total == 0, "an archived course's calendar event reappeared as a new item"

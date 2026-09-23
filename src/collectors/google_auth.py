@@ -39,11 +39,29 @@ def token_path(token_name: str) -> Path:
     return config.GOOGLE_TOKEN_DIR / f"token_{token_name}.json"
 
 
-def get_credentials(scopes: list[str], token_name: str) -> Credentials:
+class SignInRequired(Exception):
+    """Raised when a sign-in is needed but opening a browser is not allowed."""
+
+
+def get_credentials(
+    scopes: list[str],
+    token_name: str,
+    allow_browser: bool = True,
+    save: bool = True,
+) -> Credentials:
     """Return valid Google credentials for `scopes`, signing in if needed.
 
     Only the very first call for a given token_name opens the browser.
     After that the saved token is reused and refreshed silently.
+
+    allow_browser=False is for unattended runs (the scheduler). Without it,
+    a failed refresh would open a browser and wait forever, so a scheduled
+    run would hang instead of failing - and nothing after it would run.
+    With it, the need to sign in is raised as SignInRequired, which the
+    pipeline records like any other failure.
+
+    save=False leaves the token file untouched, used by --dry-run so that a
+    "write nothing" run really writes nothing.
     """
     path = token_path(token_name)
     creds: Credentials | None = None
@@ -60,7 +78,8 @@ def get_credentials(scopes: list[str], token_name: str) -> Credentials:
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            _save(creds, path)
+            if save:
+                _save(creds, path)
             log.info("Refreshed %s token.", token_name)
             return creds
         except RefreshError as exc:
@@ -69,6 +88,13 @@ def get_credentials(scopes: list[str], token_name: str) -> Credentials:
             log.warning("Could not refresh %s token (%s). Signing in again.", token_name, exc)
 
     # 3. Full browser sign-in.
+    if not allow_browser:
+        raise SignInRequired(
+            f"{token_name} needs you to sign in again, and this run is not allowed to "
+            "open a browser. Run `python -m src.run_daily` yourself once to sign in. "
+            "(Tokens expire weekly while the Google Cloud app is in Testing status.)"
+        )
+
     if not config.GOOGLE_CREDENTIALS_FILE.exists():
         raise FileNotFoundError(
             f"Google OAuth client file not found at {config.GOOGLE_CREDENTIALS_FILE}. "

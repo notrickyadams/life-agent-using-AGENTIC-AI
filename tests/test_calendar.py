@@ -176,8 +176,8 @@ def test_fetch_follows_pagination():
 # --- classroom_ref_from_description -----------------------------------------
 
 def test_classroom_ref_decodes_real_link_shape():
-    desc = "Assignment\nhttps://classroom.google.com/c/ODQ0NjU2MTM3ODUy/a/ODYyNjU3NzI2Nzcx/details"
-    assert calendar.classroom_ref_from_description(desc) == "classroom:844656137852/862657726771"
+    desc = "Assignment\nhttps://classroom.google.com/c/MTExMTExMTExMTEx/a/MjIyMjIyMjIyMjIy/details"
+    assert calendar.classroom_ref_from_description(desc) == "classroom:111111111111/222222222222"
 
 
 def test_classroom_ref_is_none_without_link():
@@ -194,9 +194,48 @@ def test_classroom_ref_is_none_for_undecodable_ids():
 
 def test_parse_fills_duplicate_of_from_description():
     raw = _load("calendar_event_allday.json")
-    raw["description"] = "https://classroom.google.com/c/ODQ0NjU2MTM3ODUy/a/ODYyNjU3NzI2Nzcx/details"
+    raw["description"] = "https://classroom.google.com/c/MTExMTExMTExMTEx/a/MjIyMjIyMjIyMjIy/details"
     row = calendar.parse_calendar_event(raw, "classroom1@group.calendar.google.com", "Data Structures")
-    assert row["duplicate_of"] == "classroom:844656137852/862657726771"
+    assert row["duplicate_of"] == "classroom:111111111111/222222222222"
 
     plain = calendar.parse_calendar_event(_load("calendar_event_allday.json"))
     assert plain["duplicate_of"] is None
+
+
+# --- timezone drift detection -----------------------------------------------
+
+class _SettingsService:
+    """Fake service exposing settings().get(setting=...).execute()."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def settings(self):
+        outer = self
+
+        class _S:
+            def get(self, setting):
+                class _R:
+                    def execute(self):
+                        if outer._value is None:
+                            raise RuntimeError("no such setting")
+                        return {"value": outer._value}
+                return _R()
+        return _S()
+
+
+def test_matching_timezones_produce_no_warning():
+    assert calendar.check_timezone_matches(_SettingsService("Africa/Cairo"), "Africa/Cairo") is None
+
+
+def test_a_timezone_mismatch_is_reported():
+    message = calendar.check_timezone_matches(_SettingsService("Europe/Berlin"), "Africa/Cairo")
+
+    assert message is not None
+    assert "Europe/Berlin" in message and "Africa/Cairo" in message
+
+
+def test_an_unreadable_google_setting_is_not_an_error():
+    """A warning must never break a sync."""
+    assert calendar.google_timezone(_SettingsService(None)) is None
+    assert calendar.check_timezone_matches(_SettingsService(None), "Africa/Cairo") is None

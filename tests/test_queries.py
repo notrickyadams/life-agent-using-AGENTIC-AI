@@ -134,3 +134,35 @@ def test_upsert_reactivates_a_row(db):
     queries.upsert_events(db, [_sample_event()])
 
     assert queries.get_event(db, "calendar:abc123")["active"] == 1
+
+
+# --- the Claude cost guardrail (counted, not asserted) ----------------------
+
+def test_claude_calls_start_at_zero(db):
+    run_id = queries.start_run(db)
+    assert queries.count_claude_calls(db, run_id) == 0
+
+
+def test_recording_a_claude_call_increments_the_count(db):
+    run_id = queries.start_run(db)
+    assert queries.record_claude_call(db, run_id) == 1
+    assert queries.count_claude_calls(db, run_id) == 1
+
+
+def test_a_second_claude_call_in_one_run_is_refused(db):
+    """V1's rule: at most one paid call per run, enforced not promised."""
+    run_id = queries.start_run(db)
+    queries.record_claude_call(db, run_id)
+
+    with pytest.raises(RuntimeError, match="refusing"):
+        queries.record_claude_call(db, run_id)
+
+    assert queries.count_claude_calls(db, run_id) == 1
+
+
+def test_the_limit_is_per_run_not_global(db):
+    first = queries.start_run(db)
+    queries.record_claude_call(db, first)
+
+    second = queries.start_run(db)
+    assert queries.record_claude_call(db, second) == 1

@@ -33,7 +33,7 @@ def test_parse_coursework_with_submission():
         _load("classroom_coursework.json"), "Data Structures", _load("classroom_submission.json")
     )
 
-    assert row["id"] == "classroom:844656137852/700000000001"
+    assert row["id"] == "classroom:111111111111/700000000001"
     assert row["source"] == "classroom"
     assert row["type"] == "assignment"
     assert row["title"] == "Sample assignment 1"
@@ -105,9 +105,9 @@ def test_sync_classroom_writes_rows_and_joins_submissions(db):
     del undated["dueTime"]
 
     service = FakeClassroom(
-        courses=[{"id": "844656137852", "name": "Data Structures", "courseState": "ACTIVE"}],
-        coursework_by_course={"844656137852": [work, undated]},
-        submissions_by_course={"844656137852": [sub]},
+        courses=[{"id": "111111111111", "name": "Data Structures", "courseState": "ACTIVE"}],
+        coursework_by_course={"111111111111": [work, undated]},
+        submissions_by_course={"111111111111": [sub]},
     )
 
     written = classroom.sync_classroom(db, service)
@@ -115,25 +115,25 @@ def test_sync_classroom_writes_rows_and_joins_submissions(db):
     assert written == 2
     assert queries.count_events(db, source="classroom") == 2
 
-    dated = queries.get_event(db, "classroom:844656137852/700000000001")
+    dated = queries.get_event(db, "classroom:111111111111/700000000001")
     assert dated["submission_state"] == "TURNED_IN"
     assert dated["course_name"] == "Data Structures"
 
-    no_date = queries.get_event(db, "classroom:844656137852/700000000002")
+    no_date = queries.get_event(db, "classroom:111111111111/700000000002")
     assert no_date["due_at"] is None
     assert no_date["submission_state"] is None   # no submission record for it
 
     # The wildcard + "me" form is what keeps this to one call per course.
     assert service.submission_calls == [
-        {"courseId": "844656137852", "courseWorkId": "-", "userId": "me", "pageToken": None}
+        {"courseId": "111111111111", "courseWorkId": "-", "userId": "me", "pageToken": None}
     ]
 
 
 def test_sync_classroom_is_idempotent(db):
     work = _load("classroom_coursework.json")
     service = FakeClassroom(
-        courses=[{"id": "844656137852", "name": "Data Structures"}],
-        coursework_by_course={"844656137852": [work]},
+        courses=[{"id": "111111111111", "name": "Data Structures"}],
+        coursework_by_course={"111111111111": [work]},
         submissions_by_course={},
     )
 

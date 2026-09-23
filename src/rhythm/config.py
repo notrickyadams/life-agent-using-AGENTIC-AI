@@ -14,9 +14,10 @@ Shape of the data:
       .days["monday"] -> Day    theme, focus, keywords
 
 Validation is strict about anything that would fail SILENTLY - a misspelled
-day name, an unknown setting, a timezone that does not exist. Those are
-reported as errors rather than quietly ignored, because the symptom
-otherwise is "my Monday theme never shows up" with no clue why.
+section header ([day.monday] instead of [days.monday]), a misspelled day
+name, a setting written outside [settings], an unknown field, a timezone
+that does not exist. Those are errors rather than quietly ignored, because
+the symptom otherwise is "my Monday theme never shows up" with no clue why.
 
 Check the file any time with:
     python -m src.rhythm.config
@@ -38,6 +39,7 @@ DEFAULT_RHYTHM_PATH = config.REPO_ROOT / "rhythm.toml"
 
 _KNOWN_SETTINGS = {"timezone", "due_soon_days", "show_overdue"}
 _KNOWN_DAY_FIELDS = {"theme", "focus", "keywords"}
+_KNOWN_SECTIONS = {"settings", "days"}
 
 
 class RhythmError(Exception):
@@ -122,6 +124,26 @@ def load_rhythm(path: Path | None = None) -> Rhythm:
 
     problems: list[str] = []
 
+    # --- top level ----------------------------------------------------------
+    # Catch the typo that matters most: a misspelled SECTION header. Without
+    # this, "[day.monday]" or "[Days.monday]" parses fine, defines nothing,
+    # and the day silently has no theme - the exact failure this validation
+    # exists to prevent. Same for a setting written outside [settings].
+    for key, value in sorted(raw.items()):
+        if key in _KNOWN_SECTIONS:
+            continue
+        if isinstance(value, dict):
+            hint = ""
+            lowered = key.lower()
+            if lowered in {"day", "days"} or lowered in WEEKDAYS:
+                hint = " Did you mean [days.<weekday>]? Section names are lower case."
+            problems.append(f"[{key}] is not a known section (typo?). Known: [settings], [days.<weekday>].{hint}")
+        else:
+            problems.append(
+                f"{key!r} is set outside any section, so it is ignored. "
+                "Settings belong under [settings]."
+            )
+
     # --- settings -----------------------------------------------------------
     settings = raw.get("settings", {})
     if not isinstance(settings, dict):
@@ -158,8 +180,12 @@ def load_rhythm(path: Path | None = None) -> Rhythm:
         raise RhythmError("[days] must contain one block per weekday, e.g. [days.monday]")
 
     for name in sorted(set(day_blocks) - set(WEEKDAYS)):
+        hint = ""
+        if name.lower() in WEEKDAYS:
+            hint = f" Weekday names are lower case - did you mean [days.{name.lower()}]?"
         problems.append(
-            f"[days.{name}] is not a weekday name (typo?). Expected one of: {', '.join(WEEKDAYS)}"
+            f"[days.{name}] is not a weekday name (typo?)."
+            f" Expected one of: {', '.join(WEEKDAYS)}.{hint}"
         )
 
     days: dict[str, Day] = {}

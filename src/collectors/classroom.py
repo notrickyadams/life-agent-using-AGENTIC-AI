@@ -41,9 +41,14 @@ TOKEN_NAME = "classroom"
 
 # --- network ----------------------------------------------------------------
 
-def get_service():
-    """Sign in (if needed) and return a Classroom API client."""
-    creds = google_auth.get_credentials(SCOPES, TOKEN_NAME)
+def get_service(allow_browser: bool = True, save_token: bool = True):
+    """Sign in (if needed) and return a Classroom API client.
+
+    See google_auth.get_credentials for what the flags do - they exist so an
+    unattended run never hangs on a browser prompt, and so a dry run does
+    not write a token file.
+    """
+    creds = google_auth.get_credentials(SCOPES, TOKEN_NAME, allow_browser, save_token)
     return google_auth.build_service("classroom", "v1", creds)
 
 
@@ -139,14 +144,14 @@ def parse_coursework(raw: dict, course_name: str, submission: dict | None = None
 
 # --- sync (glue) -------------------------------------------------------------
 
-def collect_classroom(service=None) -> list[dict]:
+def collect_classroom(service=None, *, allow_browser: bool = True, save_token: bool = True) -> list[dict]:
     """Fetch + parse all coursework and my submissions from every ACTIVE course.
 
     Returns rows ready for the events table but writes nothing - this is
     what --dry-run calls. Raises on failure; run_daily.py isolates that.
     """
     if service is None:
-        service = get_service()
+        service = get_service(allow_browser=allow_browser, save_token=save_token)
 
     rows: list[dict] = []
     for course in list_courses(service):

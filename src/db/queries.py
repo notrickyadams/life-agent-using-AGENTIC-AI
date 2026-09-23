@@ -94,9 +94,19 @@ def upsert_event(conn: sqlite3.Connection, event: dict) -> None:
 
 
 def upsert_events(conn: sqlite3.Connection, events: list[dict]) -> int:
-    """Upsert a list of events and commit once. Returns how many were written."""
-    for event in events:
-        upsert_event(conn, event)
+    """Upsert a list of events as ONE all-or-nothing batch. Returns how many.
+
+    If any row fails, every row in the batch is rolled back. Without this,
+    the rows already inserted stayed in the open transaction and were
+    committed by whatever committed next - so a half-failed collector could
+    leave a partial, silently incomplete picture in the database.
+    """
+    try:
+        for event in events:
+            upsert_event(conn, event)
+    except Exception:
+        conn.rollback()
+        raise
     conn.commit()
     return len(events)
 
@@ -224,24 +234,41 @@ def get_event(conn: sqlite3.Connection, event_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
 
 
-# runs columns that record whether each source succeeded.
-_OK_COLUMN = {"calendar": "calendar_ok", "classroom": "classroom_ok"}
+# Per-source columns on the runs table.
+_SYNCED_COLUMN = {"calendar": "calendar_synced_at", "classroom": "classroom_synced_at"}
+
+
+def record_source_synced(conn: sqlite3.Connection, run_id: int, source: str) -> str:
+    """Stamp the moment a source finished syncing successfully.
+
+    Called as soon as that source succeeds, NOT when the whole run ends,
+    because the day plan is built before the run finishes. Reading a
+    run-level finished_at meant the plan saw the previous run's timestamp
+    and could report hours-old data straight after a successful sync.
+
+    Returns the timestamp written.
+    """
+    column = _SYNCED_COLUMN.get(source)
+    if column is None:
+        raise ValueError(f"unknown source {source!r}")
+    now = utc_now_iso()
+    conn.execute(f"UPDATE runs SET {column} = ? WHERE run_id = ?", (now, run_id))
+    conn.commit()
+    return now
 
 
 def last_successful_sync(conn: sqlite3.Connection, source: str) -> str | None:
     """When this source last synced successfully, as a UTC ISO string.
 
-    Read from the runs table, not from events.last_synced_at: a sync that
+    Read from the runs table rather than events.last_synced_at: a sync that
     correctly finds nothing (every course unenrolled, say) writes no rows,
     so events would wrongly look stale. What matters is that the sync ran
-    and succeeded, not that it happened to write something.
+    and succeeded, not that it happened to write anything.
     """
-    column = _OK_COLUMN.get(source)
+    column = _SYNCED_COLUMN.get(source)
     if column is None:
         raise ValueError(f"unknown source {source!r}")
-    row = conn.execute(
-        f"SELECT MAX(finished_at) AS at FROM runs WHERE {column} = 1 AND finished_at IS NOT NULL"
-    ).fetchone()
+    row = conn.execute(f"SELECT MAX({column}) AS at FROM runs").fetchone()
     return row["at"]
 
 
@@ -258,6 +285,37 @@ def data_age_seconds(conn: sqlite3.Connection) -> float | None:
     oldest = min(stamps)
     then = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
     return (datetime.now(timezone.utc) - then).total_seconds()
+
+
+def count_claude_calls(conn: sqlite3.Connection, run_id: int) -> int:
+    """How many Claude API calls this run has recorded so far.
+
+    Counted, not asserted. Step 5 calls record_claude_call() each time it
+    uses the API, and this is what the cost guardrail in CLAUDE.md checks
+    against - a hardcoded 0 would prove nothing once that step exists.
+    """
+    row = conn.execute("SELECT claude_calls_made AS n FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+    return 0 if row is None or row["n"] is None else row["n"]
+
+
+def record_claude_call(conn: sqlite3.Connection, run_id: int, max_per_run: int = 1) -> int:
+    """Record one Claude API call against this run. Returns the new total.
+
+    Raises RuntimeError past max_per_run. V1's rule is at most one call per
+    run, on already-organised data; this makes that a thing the code
+    enforces rather than a promise in a comment.
+    """
+    current = count_claude_calls(conn, run_id)
+    if current >= max_per_run:
+        raise RuntimeError(
+            f"refusing a {current + 1}th Claude API call in one run "
+            f"(limit {max_per_run}). Routine work belongs on the local model."
+        )
+    conn.execute(
+        "UPDATE runs SET claude_calls_made = ? WHERE run_id = ?", (current + 1, run_id)
+    )
+    conn.commit()
+    return current + 1
 
 
 def get_latest_run(conn: sqlite3.Connection) -> sqlite3.Row | None:

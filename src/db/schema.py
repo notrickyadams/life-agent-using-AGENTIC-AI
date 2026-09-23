@@ -107,6 +107,12 @@ MIGRATIONS = [
     # Step 2c: how many items the day plan held. 0 is a real answer
     # ("nothing on today"), NULL means the plan stage did not run.
     ("runs", "plan_items", "INTEGER"),
+    # When each source actually finished syncing, recorded the moment it
+    # succeeds rather than when the whole run ends. Freshness is a fact
+    # about a source, not about a run: the plan is built before the run
+    # finishes, so reading finished_at told it about the PREVIOUS run.
+    ("runs", "calendar_synced_at", "TEXT"),
+    ("runs", "classroom_synced_at", "TEXT"),
 ]
 
 

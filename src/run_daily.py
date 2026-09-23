@@ -16,6 +16,8 @@ Usage:
     python -m src.run_daily --dry-run   fetch, parse and plan, write NOTHING
     python -m src.run_daily --verbose   more detail in the console
     python -m src.run_daily --quiet     no plan printout (the log still has it)
+    python -m src.run_daily --no-browser  for scheduled runs: fail rather than
+                                          wait at a browser sign-in prompt
 
 Exit codes (the scheduler reads these):
     0  everything succeeded
@@ -38,7 +40,7 @@ log = logging.getLogger(__name__)
 
 # name -> function returning rows for the events table. Kept as data so
 # tests can swap in fakes and so adding a source later is one line.
-Collector = Callable[[], list[dict]]
+Collector = Callable[..., list[dict]]
 COLLECTORS: dict[str, Collector] = {
     "calendar": calendar.collect_calendar,
     "classroom": classroom.collect_classroom,
@@ -76,29 +78,51 @@ def setup_logging(verbose: bool = False) -> None:
     logging.getLogger("google.oauth2.credentials").setLevel(logging.ERROR)
 
 
-def run_pipeline(conn, collectors: dict[str, Collector], dry_run: bool = False) -> dict[str, dict]:
+def run_pipeline(
+    conn,
+    collectors: dict[str, Collector],
+    dry_run: bool = False,
+    allow_browser: bool = True,
+) -> dict[str, dict]:
     """Run every collector, each isolated from the others, and record the run.
 
     Returns {name: {"ok": bool, "rows": int, "inactive": int, "error": str|None}}.
     A collector that raises is logged with its traceback and marked failed;
-    the remaining collectors still run. With dry_run, nothing is written.
+    the remaining collectors still run.
+
+    dry_run writes nothing that outlives the call - no token file, no rows,
+    no runs row. Fetched rows ARE loaded into an open transaction so the
+    plan reflects what was just fetched rather than what happened to be
+    stored, and that transaction is rolled back before returning.
+
+    allow_browser=False is for scheduled runs: a sign-in that would need a
+    browser is recorded as a failure instead of hanging forever.
     """
     started_at = queries.utc_now_iso()
     run_id = None if dry_run else queries.start_run(conn, started_at)
     if dry_run:
-        log.info("DRY RUN - fetching and parsing only, nothing will be written")
+        log.info("DRY RUN - nothing will be kept: no rows, no token file, no run record")
 
     results: dict[str, dict] = {}
     for name, collect in collectors.items():
         outcome = {"ok": False, "rows": 0, "inactive": 0, "error": None}
         try:
-            rows = collect()
+            # A dry run must not refresh-and-save a token file either.
+            rows = collect(allow_browser=allow_browser, save_token=not dry_run)
             outcome["rows"] = len(rows)
-            if not dry_run:
+            if dry_run:
+                # Load into the open transaction so the plan below sees this
+                # data; rolled back at the end, so nothing is kept.
+                for row in rows:
+                    queries.upsert_event(conn, row)
+            else:
                 queries.upsert_events(conn, rows)
                 # Anything from this source that Google did NOT return this
                 # time is flagged, never deleted. Only safe after success.
                 outcome["inactive"] = queries.mark_unseen_inactive(conn, name, started_at)
+                # Stamped here, the moment this source succeeded, so the
+                # plan built below sees THIS run rather than the last one.
+                queries.record_source_synced(conn, run_id, name)
             outcome["ok"] = True
             log.info("%s: %d rows%s", name, len(rows),
                      f", {outcome['inactive']} now inactive" if outcome["inactive"] else "")
@@ -137,6 +161,11 @@ def run_pipeline(conn, collectors: dict[str, Collector], dry_run: bool = False) 
         log.exception("plan stage failed")
         results["plan"] = plan_outcome
 
+    if dry_run:
+        # Discard everything the dry run loaded, including the rows the plan
+        # was built from. Nothing reaches disk.
+        conn.rollback()
+
     if not dry_run:
         errors = [
             f"{n}: {r['error']}"
@@ -148,7 +177,10 @@ def run_pipeline(conn, collectors: dict[str, Collector], dry_run: bool = False) 
             run_id,
             calendar_ok=results.get("calendar", {}).get("ok"),
             classroom_ok=results.get("classroom", {}).get("ok"),
-            claude_calls_made=0,          # nothing calls Claude before step 5
+            # Counted from what actually happened, not asserted. Nothing
+            # calls Claude before step 5, so this reads 0 today - but it
+            # will keep telling the truth once step 5 exists.
+            claude_calls_made=queries.count_claude_calls(conn, run_id),
             plan_items=plan_outcome["items"],
             error="; ".join(errors) or None,
         )
@@ -160,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="fetch, parse and plan, but write nothing")
     parser.add_argument("--verbose", action="store_true", help="debug-level logging")
     parser.add_argument("--quiet", action="store_true", help="do not print the plan (the log still has it)")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="never open a browser to sign in; fail instead (use this for scheduled runs)")
     args = parser.parse_args(argv)
 
     sys.stdout.reconfigure(encoding="utf-8")
@@ -177,7 +211,8 @@ def main(argv: list[str] | None = None) -> int:
     if added:
         log.info("database updated: added %s", ", ".join(added))
     try:
-        results = run_pipeline(conn, COLLECTORS, dry_run=args.dry_run)
+        results = run_pipeline(conn, COLLECTORS, dry_run=args.dry_run,
+                               allow_browser=not args.no_browser)
     finally:
         conn.close()
 

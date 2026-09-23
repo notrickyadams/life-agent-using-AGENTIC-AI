@@ -172,3 +172,51 @@ def test_the_projects_own_rhythm_file_is_valid():
     rhythm = load_rhythm()
     assert rhythm.timezone
     assert set(rhythm.days) == set(rhythm_config.WEEKDAYS)
+
+
+# --- section-header typos (these used to be accepted silently) -------------
+
+def test_a_misspelled_section_header_is_rejected(tmp_path):
+    """[day.monday] parses fine, defines nothing, and would leave Monday
+    themeless with no clue why. That is exactly what validation is for."""
+    text = MINIMAL + '\n[day.monday]\ntheme = "study"\n'
+    with pytest.raises(RhythmError, match=r"\[day\] is not a known section"):
+        load_rhythm(_write(tmp_path, text))
+
+
+def test_a_capitalised_section_header_is_rejected(tmp_path):
+    text = MINIMAL + '\n[Days.monday]\ntheme = "study"\n'
+    with pytest.raises(RhythmError, match="not a known section"):
+        load_rhythm(_write(tmp_path, text))
+
+
+def test_a_capitalised_day_name_is_rejected_with_a_hint(tmp_path):
+    text = MINIMAL + '\n[days.Monday]\ntheme = "study"\n'
+    with pytest.raises(RhythmError, match="lower case"):
+        load_rhythm(_write(tmp_path, text))
+
+
+def test_a_setting_outside_the_settings_section_is_rejected(tmp_path):
+    """Written above [settings] it is top-level, silently ignored."""
+    text = "due_soon_days = 99\n" + MINIMAL
+    with pytest.raises(RhythmError, match="outside any section"):
+        load_rhythm(_write(tmp_path, text))
+
+
+def test_an_unknown_top_level_section_is_rejected(tmp_path):
+    text = MINIMAL + '\n[rhythm]\nfoo = "bar"\n'
+    with pytest.raises(RhythmError, match=r"\[rhythm\] is not a known section"):
+        load_rhythm(_write(tmp_path, text))
+
+
+def test_a_weekday_section_at_the_top_level_gets_a_hint(tmp_path):
+    """[monday] instead of [days.monday]."""
+    text = MINIMAL + '\n[monday]\ntheme = "study"\n'
+    with pytest.raises(RhythmError, match=r"days\.<weekday>"):
+        load_rhythm(_write(tmp_path, text))
+
+
+def test_a_correct_file_is_still_accepted(tmp_path):
+    """Guard against the validation becoming over-eager."""
+    rhythm = load_rhythm(_write(tmp_path, FULL))
+    assert rhythm.days["monday"].theme == "certification_study"

@@ -69,7 +69,22 @@ class Item:
     due_at: str | None
     local_date: date | None
     local_time: str | None
+    # End of a multi-day calendar event, in local terms. None for anything
+    # that happens at a single moment.
+    local_end_date: date | None = None
     matched_keywords: tuple[str, ...] = ()
+
+    def spans(self, on: date) -> bool:
+        """True when this item is in progress on `on`.
+
+        A conference from the 20th to the 26th is happening on the 23rd even
+        though it started days earlier. Without this, anything already under
+        way simply disappeared from the plan.
+        """
+        if self.local_date is None:
+            return False
+        end = self.local_end_date or self.local_date
+        return self.local_date <= on <= end
 
     @property
     def is_done(self) -> bool:
@@ -80,15 +95,30 @@ class Item:
     def needs_action(self) -> bool:
         """True for an assignment you have not turned in.
 
-        Calendar events have no submission state, so they are never
-        'needing action' - they are simply scheduled.
+        Anything from Classroom that is not positively known to be finished
+        still needs doing - including an assignment Google returned no
+        submission record for. Treating a missing record as 'done' would
+        silently hide real work. Calendar events are never 'needing action';
+        they are scheduled, not owed.
         """
-        return self.submission_state in NEEDS_ACTION_STATES
+        if self.source != "classroom":
+            return False
+        return not self.is_done
 
     @property
     def label(self) -> str:
         """One line for a human: course prefix, title, time, and status."""
+        return self.describe()
+
+    def describe(self, with_date: bool = False) -> str:
+        """One line for a human.
+
+        with_date is used for sections that are NOT today, where a bare time
+        like "00:00" would otherwise leave you guessing which day it means.
+        """
         parts = []
+        if with_date and self.local_date:
+            parts.append(self.local_date.strftime("%a %d %b"))
         if self.local_time:
             parts.append(self.local_time)
         name = f"{self.course_name}: {self.title}" if self.course_name else self.title
@@ -96,7 +126,7 @@ class Item:
         if self.is_done:
             parts.append("(done)")
         elif self.needs_action:
-            parts.append("(not turned in)")
+            parts.append("(not turned in)" if self.submission_state else "(no submission record)")
         if self.matched_keywords:
             parts.append(f"[{', '.join(self.matched_keywords)}]")
         return " ".join(parts)
@@ -185,27 +215,44 @@ def load_items(conn, rhythm: Rhythm) -> list[Item]:
     """Read every active row and prepare it, dropping mirrored duplicates.
 
     A calendar event that Classroom created for an assignment is skipped when
-    that assignment is also present and active - otherwise the same due date
-    appears twice, once with submission state and once without.
+    that assignment is known at all - active or not. Otherwise the same due
+    date appears twice, once with submission state and once without, and an
+    archived course's leftover calendar events reappear as if they were new.
     """
     rows = conn.execute(
         """
         SELECT id, source, type, title, course_name, submission_state, link,
-               all_day, due_at, duplicate_of
+               all_day, due_at, end_at, duplicate_of
         FROM events
         WHERE active = 1
         """
     ).fetchall()
 
-    present = {row["id"] for row in rows}
+    # Known Classroom rows, active or not. An archived or unenrolled course
+    # keeps its calendar, so its events would otherwise stop being
+    # recognised as mirrors and reappear as if they were separate items.
+    known_ids = {
+        r["id"] for r in conn.execute("SELECT id FROM events WHERE source = 'classroom'")
+    }
 
     items: list[Item] = []
     for row in rows:
         mirrors = row["duplicate_of"]
-        if mirrors and mirrors in present:
+        if mirrors and mirrors in known_ids:
             continue  # the Classroom row carries more information; keep that one
 
-        local_date, local_time = to_local_parts(row["due_at"], bool(row["all_day"]), rhythm)
+        all_day = bool(row["all_day"])
+        local_date, local_time = to_local_parts(row["due_at"], all_day, rhythm)
+        local_end_date, _ = to_local_parts(row["end_at"], all_day, rhythm)
+
+        # Google gives an all-day event an EXCLUSIVE end date: a single-day
+        # event on the 21st ends on the 22nd. Step back a day so the stored
+        # end is the last day the event actually covers.
+        if all_day and local_end_date is not None:
+            local_end_date -= timedelta(days=1)
+            if local_date and local_end_date < local_date:
+                local_end_date = local_date
+
         items.append(
             Item(
                 id=row["id"],
@@ -219,9 +266,22 @@ def load_items(conn, rhythm: Rhythm) -> list[Item]:
                 due_at=row["due_at"],
                 local_date=local_date,
                 local_time=local_time,
+                local_end_date=local_end_date,
             )
         )
     return items
+
+
+def _deadline_passed(item: Item, on: date, now_local: datetime, planning_today: bool) -> bool:
+    """True when an assignment's deadline was earlier today and it is still owed.
+
+    Only meaningful when planning the actual current day: for a past or
+    future date there is no "now" to compare against, so a deadline on that
+    day is simply part of that day.
+    """
+    if not planning_today or not item.needs_action or item.all_day or not item.local_time:
+        return False
+    return item.local_time < now_local.strftime("%H:%M")
 
 
 def _sort_key(item: Item) -> tuple:
@@ -246,6 +306,9 @@ def build_plan(conn, rhythm: Rhythm, on: date | None = None) -> DayPlan:
 
     plan = DayPlan(on=on, day=day, data_age_seconds=queries.data_age_seconds(conn))
 
+    now_local = rhythm.local_now()
+    planning_today = on == now_local.date()
+
     for item in load_items(conn, rhythm):
         item.matched_keywords = tuple(day.matches(item.title, item.course_name))
 
@@ -257,18 +320,27 @@ def build_plan(conn, rhythm: Rhythm, on: date | None = None) -> DayPlan:
                 plan.themed.append(item)
             continue
 
-        if when < on:
-            # In the past. Only assignments you still owe are worth showing.
+        if item.spans(on):
+            # Happening on this day - including a multi-day event that
+            # started earlier and has not finished yet.
+            if _deadline_passed(item, on, now_local, planning_today):
+                # A deadline earlier today that came and went is owed, not
+                # upcoming. Only assignments have deadlines in this sense.
+                if rhythm.show_overdue:
+                    plan.overdue.append(item)
+                continue
+            plan.today.append(item)
+        elif when < on:
+            # Finished or past. Only work you still owe is worth showing.
             if rhythm.show_overdue and item.needs_action:
                 plan.overdue.append(item)
-        elif when == on:
-            plan.today.append(item)
         elif when <= horizon:
             # Upcoming. A finished assignment needs no reminder.
             if not item.is_done:
                 plan.due_soon.append(item)
-        elif item.matched_keywords:
+        elif item.matched_keywords and not item.is_done:
             # Further out, but it fits today's theme, so it is worth knowing.
+            # Finished work is never surfaced by a keyword match.
             plan.themed.append(item)
 
     for bucket in (plan.overdue, plan.today, plan.due_soon, plan.themed):
@@ -332,9 +404,12 @@ def format_plan(plan: DayPlan) -> str:
     for title, items in sections:
         if not items:
             continue
+        # Everything outside TODAY belongs to another day, so name that day -
+        # a bare "00:00" is otherwise ambiguous between tonight and tomorrow.
+        with_date = title != "TODAY"
         lines.append(f"{title} ({len(items)})")
         for item in items:
-            lines.append(f"  - {item.label}")
+            lines.append(f"  - {item.describe(with_date=with_date)}")
         lines.append("")
 
     if plan.is_empty:
@@ -383,7 +458,7 @@ def _main() -> int:
             # stored - a slightly old plan beats no plan.
             from src.run_daily import COLLECTORS, run_pipeline
 
-            results = run_pipeline(conn, COLLECTORS)
+            results = run_pipeline(conn, COLLECTORS, allow_browser=True)
             results.pop("_plan", None)
             for name, outcome in results.items():
                 if not outcome.get("ok"):

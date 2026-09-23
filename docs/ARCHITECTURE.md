@@ -97,6 +97,32 @@ Everything above the Notion writer runs locally and costs nothing except the
 one daily Claude API call. This boundary is the main thing to protect as the
 system grows — see CLAUDE.md's non-negotiable constraints.
 
+## Known limits and deliberate deviations
+
+Recorded here so they are not rediscovered as surprises.
+
+- **Calendar/Classroom duplicate detection has never fired on real data.**
+  It works by decoding the Classroom link Google puts in a mirrored event's
+  description, and it is covered by tests, but every real mirror so far has
+  belonged to an archived course. Treat it as unproven in the wild until a
+  live course produces one.
+- **Dedupe arrived in step 1, not step 4.** CLAUDE.md lists dedupe as
+  local-model work. What was built is not that: it is an exact ID match
+  decoded from a link, with no guessing and no model. The model's dedupe job
+  in step 4 (same work described differently in two places) is untouched.
+- **Classroom calendars are found by the id prefix `classroom`.** Every
+  course calendar in this account follows it, but Google does not document
+  it as guaranteed. If it stops matching, list the ids in `CALENDAR_IDS`
+  and set `CALENDAR_INCLUDE_CLASSROOM=false`.
+- **`rhythm.toml` holds the timezone, not Google.** The file is explicit,
+  versioned and works offline. Each sync compares it with the account's
+  setting and warns on a mismatch, so drift is detected rather than assumed
+  away.
+- **An unattended run never opens a browser.** `--no-browser` makes a
+  needed sign-in a recorded failure instead of a process that waits
+  forever. While the Google Cloud app is in *Testing* status, tokens expire
+  about weekly, so this will fire until the app is published.
+
 ## What's explicitly out of scope for V1
 
 - Web search / opportunity discovery

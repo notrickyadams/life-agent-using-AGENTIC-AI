@@ -41,10 +41,44 @@ TOKEN_NAME = "calendar"
 
 # --- network ----------------------------------------------------------------
 
-def get_service():
-    """Sign in (if needed) and return a Calendar API client."""
-    creds = google_auth.get_credentials(SCOPES, TOKEN_NAME)
+def get_service(allow_browser: bool = True, save_token: bool = True):
+    """Sign in (if needed) and return a Calendar API client.
+
+    See google_auth.get_credentials for what the flags do - they exist so an
+    unattended run never hangs on a browser prompt, and so a dry run does
+    not write a token file.
+    """
+    creds = google_auth.get_credentials(SCOPES, TOKEN_NAME, allow_browser, save_token)
     return google_auth.build_service("calendar", "v3", creds)
+
+
+def google_timezone(service) -> str | None:
+    """The timezone Google has set on this account, e.g. 'Africa/Cairo'.
+
+    rhythm.toml stays the source of truth - it is explicit, versioned, and
+    works offline. This exists so a mismatch is DETECTED rather than
+    assumed away: if you move, or change the setting in Google, the sync
+    warns instead of silently planning your day in the wrong zone.
+    """
+    try:
+        return service.settings().get(setting="timezone").execute().get("value")
+    except Exception as exc:  # noqa: BLE001 - a warning must never fail a sync
+        log.debug("could not read Google's timezone setting: %s", exc)
+        return None
+
+
+def check_timezone_matches(service, configured: str) -> str | None:
+    """Warn when Google's timezone differs from rhythm.toml. Returns a message or None."""
+    google_tz = google_timezone(service)
+    if google_tz and configured and google_tz != configured:
+        message = (
+            f"timezone mismatch: rhythm.toml says {configured!r} but your Google "
+            f"account says {google_tz!r}. Times will be shown in {configured!r}. "
+            "Update rhythm.toml if you have moved."
+        )
+        log.warning(message)
+        return message
+    return None
 
 
 def list_calendars(service) -> list[dict]:
@@ -171,8 +205,8 @@ def _decode_id(token: str) -> str | None:
 def classroom_ref_from_description(description: str | None) -> str | None:
     """If a calendar event mirrors a Classroom assignment, return that row's id.
 
-    'https://classroom.google.com/c/ODQ0NjU2MTM3ODUy/a/ODYyNjU3NzI2Nzcx/details'
-        -> 'classroom:844656137852/862657726771'
+    'https://classroom.google.com/c/MTExMTExMTExMTEx/a/MjIyMjIyMjIyMjIy/details'
+        -> 'classroom:111111111111/222222222222'
 
     Returns None when there is no link or it doesn't decode cleanly. Being
     unsure means "not a duplicate" - a missed duplicate is one redundant
@@ -232,14 +266,22 @@ def parse_calendar_event(raw: dict, calendar_id: str = "primary", calendar_name:
 
 # --- sync (glue) -------------------------------------------------------------
 
-def collect_calendar(service=None) -> list[dict]:
+def collect_calendar(service=None, *, allow_browser: bool = True, save_token: bool = True) -> list[dict]:
     """Fetch + parse every calendar in scope for the configured window.
 
     Returns rows ready for the events table but writes nothing - this is
     what --dry-run calls. Raises on failure; run_daily.py isolates that.
     """
     if service is None:
-        service = get_service()
+        service = get_service(allow_browser=allow_browser, save_token=save_token)
+
+    # One cheap call, so a wrong timezone is caught rather than assumed.
+    try:
+        from src.rhythm.config import load_rhythm
+
+        check_timezone_matches(service, load_rhythm().timezone)
+    except Exception as exc:  # noqa: BLE001 - never fail a sync over a warning
+        log.debug("timezone check skipped: %s", exc)
 
     time_min, time_max = sync_window()
     rows: list[dict] = []
