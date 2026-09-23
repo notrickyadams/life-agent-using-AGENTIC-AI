@@ -1,0 +1,16 @@
+{
+  "courseId": "844656137852",
+  "id": "700000000001",
+  "title": "Sample assignment 1",
+  "description": "Placeholder description",
+  "state": "PUBLISHED",
+  "alternateLink": "https://classroom.google.com/c/sample/a/sample/details",
+  "creationTime": "2026-05-15T10:00:00.000Z",
+  "updateTime": "2026-05-15T10:00:00.000Z",
+  "dueDate": {"year": 2026, "month": 5, "day": 22},
+  "dueTime": {"hours": 20, "minutes": 59},
+  "maxPoints": 10,
+  "workType": "ASSIGNMENT",
+  "submissionModificationMode": "MODIFIABLE_UNTIL_TURNED_IN",
+  "creatorUserId": "100000000000000000000"
+}

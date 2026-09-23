@@ -1,0 +1,46 @@
+# --- Secrets: never commit these -------------------------------------------
+# The real .env holds API keys and tokens. Only .env.example is tracked.
+.env
+.env.*
+!.env.example
+
+# Google OAuth files. credentials.json is the client secret you download from
+# Google Cloud Console; token*.json / *.pickle are the per-user tokens that
+# google-auth-oauthlib writes after you sign in once in the browser.
+credentials.json
+client_secret*.json
+token*.json
+*.pickle
+
+# --- Local data: the SQLite database and anything derived from it ----------
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Logs and OS noise ------------------------------------------------------
+logs/
+*.log
+.DS_Store
+Thumbs.db
+
+# --- Editor / tool state ---------------------------------------------------
+.vscode/
+.idea/
+.claude/settings.local.json

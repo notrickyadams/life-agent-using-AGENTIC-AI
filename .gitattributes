@@ -1,0 +1,3 @@
+# Normalise line endings so the repo stays consistent regardless of OS.
+# Without this, Windows checkouts produce noisy whole-file diffs.
+* text=auto eol=lf

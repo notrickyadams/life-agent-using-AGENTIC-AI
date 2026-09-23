@@ -1,0 +1,19 @@
+{
+  "kind": "calendar#event",
+  "etag": "\"0000000000000001\"",
+  "id": "sampletimed0000000000000000000cd",
+  "status": "confirmed",
+  "htmlLink": "https://www.google.com/calendar/event?eid=sample-timed",
+  "created": "2026-03-01T10:00:00.000Z",
+  "updated": "2026-03-01T10:00:00.000Z",
+  "summary": "Sample lecture",
+  "description": "Placeholder description",
+  "creator": {"email": "someone@example.com"},
+  "organizer": {"email": "someone@example.com"},
+  "start": {"dateTime": "2026-03-12T09:00:00+03:00", "timeZone": "Africa/Cairo"},
+  "end": {"dateTime": "2026-03-12T10:30:00+03:00", "timeZone": "Africa/Cairo"},
+  "iCalUID": "sampletimed@google.com",
+  "sequence": 0,
+  "reminders": {"useDefault": true},
+  "eventType": "default"
+}

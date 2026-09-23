@@ -1,0 +1,12 @@
+# Phase 0 (V1 step 1) — Google Calendar + Classroom sync into SQLite.
+# Install with:  python -m pip install -r requirements.txt
+# Versions are pinned to what was actually installed, so a fresh setup
+# gets the same behaviour. Later steps append their own packages here.
+
+google-api-python-client==2.200.0
+google-auth-oauthlib==1.4.1
+google-auth-httplib2==0.4.2
+python-dotenv==1.2.3
+
+# --- development only (tests) ---
+pytest==9.1.1

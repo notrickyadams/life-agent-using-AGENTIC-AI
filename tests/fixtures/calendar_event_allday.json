@@ -1,0 +1,19 @@
+{
+  "kind": "calendar#event",
+  "etag": "\"0000000000000000\"",
+  "id": "sampleallday000000000000000000ab",
+  "status": "confirmed",
+  "htmlLink": "https://www.google.com/calendar/event?eid=sample-allday",
+  "created": "2026-02-01T10:00:00.000Z",
+  "updated": "2026-02-01T10:00:00.000Z",
+  "summary": "Sample assignment due",
+  "description": "Placeholder description",
+  "creator": {"email": "classroom-noreply@example.com"},
+  "organizer": {"email": "classroom-noreply@example.com"},
+  "start": {"date": "2026-02-28"},
+  "end": {"date": "2026-03-01"},
+  "iCalUID": "sampleallday@google.com",
+  "sequence": 0,
+  "reminders": {"useDefault": true},
+  "eventType": "default"
+}
