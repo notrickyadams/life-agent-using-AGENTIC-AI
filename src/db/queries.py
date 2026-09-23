@@ -10,6 +10,7 @@ Writing:
   upsert_events(conn, events)            the same for a list, one commit at the end
   start_run(conn, started_at) -> run_id  record that a pipeline run began
   mark_unseen_inactive(conn, source, since)  flag rows a successful sync did not return
+  set_tags(conn, event_id, tags, source) replace one source's tags on an event
   finish_run(conn, run_id, ...)          record how it ended
 
 Reading:
@@ -156,6 +157,50 @@ def finish_run(
         (utc_now_iso(), _flag(calendar_ok), _flag(classroom_ok), claude_calls_made, error, run_id),
     )
     conn.commit()
+
+
+# --- tags --------------------------------------------------------------------
+
+def set_tags(conn: sqlite3.Connection, event_id: str, tags: list[str], source: str) -> int:
+    """Replace this source's tags for one event. Returns how many were written.
+
+    Scoped to `source`, so rewriting the rule tags never disturbs tags the
+    local model or you put there. Called on every run, so a keyword removed
+    from rhythm.toml stops appearing rather than lingering forever.
+    """
+    conn.execute("DELETE FROM tags WHERE event_id = ? AND source = ?", (event_id, source))
+    now = utc_now_iso()
+    conn.executemany(
+        "INSERT OR REPLACE INTO tags (event_id, tag, source, created_at) VALUES (?, ?, ?, ?)",
+        [(event_id, tag, source, now) for tag in tags],
+    )
+    return len(tags)
+
+
+def clear_tags_by_source(conn: sqlite3.Connection, source: str) -> int:
+    """Remove every tag from one source. Returns how many were removed.
+
+    Used before rewriting rule tags: they are a pure function of rhythm.toml
+    and the events, so rebuilding them wholesale is both correct and cheap.
+    Without this, a keyword removed from the config would leave its tags
+    behind forever.
+    """
+    cursor = conn.execute("DELETE FROM tags WHERE source = ?", (source,))
+    return cursor.rowcount
+
+
+def get_tags(conn: sqlite3.Connection, event_id: str, source: str | None = None) -> list[str]:
+    """Tags on one event, optionally only those from one source."""
+    if source is None:
+        rows = conn.execute(
+            "SELECT tag FROM tags WHERE event_id = ? ORDER BY tag", (event_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT tag FROM tags WHERE event_id = ? AND source = ? ORDER BY tag",
+            (event_id, source),
+        ).fetchall()
+    return [row["tag"] for row in rows]
 
 
 # --- reading ----------------------------------------------------------------

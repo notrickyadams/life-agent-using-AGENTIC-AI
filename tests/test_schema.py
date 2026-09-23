@@ -4,7 +4,7 @@ from src.db import schema
 
 
 def test_init_creates_expected_tables(db):
-    assert schema.table_names(db) == ["events", "runs"]
+    assert schema.table_names(db) == ["events", "runs", "tags"]
 
 
 def test_init_is_safe_to_run_twice(db):

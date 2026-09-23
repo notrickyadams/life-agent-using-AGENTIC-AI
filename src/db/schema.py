@@ -8,11 +8,12 @@ Every statement uses IF NOT EXISTS, so init_db() is safe to call at the
 start of every run: missing tables are created, existing tables and their
 data are left untouched.
 
-Tables in Phase 0:
+Tables:
   events  - one row per calendar event or classroom assignment
+  tags    - labels on an event, with the source that decided each one
   runs    - one row per pipeline run, for cost tracking and failure visibility
 
-Later steps add `tags` (step 4). The rhythm config stays a file, not a table.
+The rhythm config stays a file (rhythm.toml), not a table.
 """
 
 import sqlite3
@@ -64,6 +65,22 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_due_at ON events(due_at);
 CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
 CREATE INDEX IF NOT EXISTS idx_events_active ON events(active);
+
+-- Labels attached to an event. One row per (event, tag, source).
+-- `source` records WHO decided: 'rule' = keyword match from rhythm.toml,
+-- 'local_model' = Ollama (step 4), 'manual' = set by hand. Keeping the
+-- source means a bad model tag can be found and removed without touching
+-- the deterministic ones.
+CREATE TABLE IF NOT EXISTS tags (
+    event_id   TEXT NOT NULL,
+    tag        TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (event_id, tag, source),
+    FOREIGN KEY (event_id) REFERENCES events(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tags_event ON tags(event_id);
 
 CREATE TABLE IF NOT EXISTS runs (
     run_id            INTEGER PRIMARY KEY AUTOINCREMENT,
