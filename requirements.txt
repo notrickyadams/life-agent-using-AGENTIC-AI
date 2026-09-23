@@ -8,5 +8,9 @@ google-auth-oauthlib==1.4.1
 google-auth-httplib2==0.4.2
 python-dotenv==1.2.3
 
+# Timezone database. Windows has no system tz database, so zoneinfo
+# (standard library) cannot resolve names like "Africa/Cairo" without this.
+tzdata==2026.4
+
 # --- development only (tests) ---
 pytest==9.1.1

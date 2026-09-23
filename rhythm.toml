@@ -1,0 +1,74 @@
+# ---------------------------------------------------------------------------
+# YOUR WEEKLY RHYTHM
+#
+# This file is the one place that says what each day of the week is FOR.
+# It is plain text, tracked in git, and meant to be edited by hand - edit it
+# whenever your week changes. Nothing else needs to change when you do.
+#
+# A day with no theme is perfectly fine and fully supported: you still get
+# everything scheduled and everything due, just without a themed section.
+# Fill days in gradually as you work out what your week actually looks like.
+#
+# After any edit, check the file is valid with:
+#     python -m src.rhythm.config
+# ---------------------------------------------------------------------------
+
+[settings]
+# Your local timezone. "Today" is worked out in this zone, not UTC, so a
+# 23:00 Cairo event belongs to today rather than tomorrow.
+# Read from your Google Calendar account settings.
+timezone = "Africa/Cairo"
+
+# An assignment counts as "due soon" this many days ahead.
+due_soon_days = 3
+
+# Show assignments whose due date has passed and that are not turned in.
+show_overdue = true
+
+
+# ---------------------------------------------------------------------------
+# One block per day. Every field is optional.
+#
+#   theme    short name for the day, e.g. "certification_study"
+#   focus    one line, in your words, shown as-is in the daily view
+#   keywords items whose title or course name contains any of these are
+#            pulled into the day's themed section (matching ignores case)
+#
+# To give a day a theme, fill in the fields. To leave a day open, leave them
+# empty - that is a real, supported state, not a placeholder.
+# ---------------------------------------------------------------------------
+
+[days.monday]
+theme = "certification_study"
+focus = ""
+keywords = ["cca-f", "cert", "exam"]
+
+[days.tuesday]
+theme = "open_source"
+focus = ""
+keywords = ["oss", "open source", "github", "pull request"]
+
+[days.wednesday]
+theme = ""
+focus = ""
+keywords = []
+
+[days.thursday]
+theme = ""
+focus = ""
+keywords = []
+
+[days.friday]
+theme = ""
+focus = ""
+keywords = []
+
+[days.saturday]
+theme = ""
+focus = ""
+keywords = []
+
+[days.sunday]
+theme = ""
+focus = ""
+keywords = []

@@ -39,17 +39,32 @@ redesign):
 - `events` — id, source (calendar/classroom), title, type
   (event/assignment/exam), due_at, raw_json, last_synced_at
 - `tags` — event_id, tag, source (local_model/claude/manual)
-- `rhythm_days` — day_of_week, theme_name, priority_tags (see rhythm config)
+- ~~`rhythm_days`~~ — **not built.** This line conflicted with the Rhythm
+  config section below, which says the rhythm is "a plain, human-edited file
+  (YAML or JSON, not a database table)". Resolved in favour of the file:
+  `rhythm.toml` is the single source of truth, read fresh each run. Nothing
+  needs to query a past rhythm, and two copies could disagree.
 - `runs` — run_id, started_at, finished_at, claude_calls_made (for cost
   tracking — should always be 0 or 1 per run in V1)
 
 ### Rhythm config
-A plain, human-edited file (YAML or JSON, not a database table) — e.g.:
+A plain, human-edited file (not a database table). Built as **TOML**
+(`rhythm.toml` in the repo root) rather than the YAML sketched here: Python
+3.11+ parses TOML with the standard library, so it adds no dependency, and
+it supports comments so the file can explain itself. The field named
+`priority_tags` below is built as `keywords`, which is what it does — items
+whose title or course name contains one are pulled into the day's section.
 
-```yaml
-monday: {theme: certification_study, priority_tags: [cca-f, exam]}
-tuesday: {theme: open_source, priority_tags: [oss, project]}
+```toml
+[days.monday]
+theme = "certification_study"
+focus = ""                       # your words, shown as-is
+keywords = ["cca-f", "exam"]
 ```
+
+A day with no theme is a supported state, not a placeholder: you still get
+everything scheduled and everything due, just with no themed section. This
+is what lets the rhythm be filled in gradually.
 
 The agent loop reads this before touching the database so "what matters
 today" is filtered through the day's theme from the start, not decided ad hoc
