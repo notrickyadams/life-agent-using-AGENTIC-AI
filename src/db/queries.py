@@ -218,6 +218,43 @@ def get_tags(conn: sqlite3.Connection, event_id: str, source: str | None = None)
     return [row["tag"] for row in rows]
 
 
+# --- Notion block bookkeeping ------------------------------------------------
+
+def record_notion_blocks(conn: sqlite3.Connection, page_id: str, block_ids: list[str]) -> int:
+    """Remember the blocks the agent just created on a Notion page.
+
+    This record is what makes the next run safe: it deletes exactly these
+    ids and leaves everything else alone, so nothing you add to the page can
+    be destroyed by the agent.
+    """
+    now = utc_now_iso()
+    conn.executemany(
+        "INSERT OR REPLACE INTO notion_blocks (block_id, page_id, written_at) VALUES (?, ?, ?)",
+        [(block_id, page_id, now) for block_id in block_ids],
+    )
+    conn.commit()
+    return len(block_ids)
+
+
+def get_notion_blocks(conn: sqlite3.Connection, page_id: str) -> list[str]:
+    """The block ids the agent previously wrote to this page, oldest first."""
+    rows = conn.execute(
+        "SELECT block_id FROM notion_blocks WHERE page_id = ? ORDER BY written_at, rowid",
+        (page_id,),
+    ).fetchall()
+    return [row["block_id"] for row in rows]
+
+
+def forget_notion_blocks(conn: sqlite3.Connection, block_ids: list[str]) -> int:
+    """Drop ids that are no longer on the page (deleted, or already gone)."""
+    if not block_ids:
+        return 0
+    marks = ",".join("?" for _ in block_ids)
+    cursor = conn.execute(f"DELETE FROM notion_blocks WHERE block_id IN ({marks})", block_ids)
+    conn.commit()
+    return cursor.rowcount
+
+
 # --- reading ----------------------------------------------------------------
 
 def count_events(conn: sqlite3.Connection, source: str | None = None) -> int:

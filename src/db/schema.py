@@ -9,9 +9,10 @@ start of every run: missing tables are created, existing tables and their
 data are left untouched.
 
 Tables:
-  events  - one row per calendar event or classroom assignment
-  tags    - labels on an event, with the source that decided each one
-  runs    - one row per pipeline run, for cost tracking and failure visibility
+  events        - one row per calendar event or classroom assignment
+  tags          - labels on an event, with the source that decided each one
+  notion_blocks - ids of the blocks this agent wrote into Notion
+  runs          - one row per pipeline run, for cost tracking and failures
 
 The rhythm config stays a file (rhythm.toml), not a table.
 """
@@ -81,6 +82,18 @@ CREATE TABLE IF NOT EXISTS tags (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tags_event ON tags(event_id);
+
+-- Blocks this agent created in Notion, so a later run can delete exactly
+-- those and nothing else. Without this record the writer would have to
+-- guess which blocks were its own, and anything you typed on the page -
+-- or a sub-page, which deletes recursively - could be destroyed.
+CREATE TABLE IF NOT EXISTS notion_blocks (
+    block_id   TEXT PRIMARY KEY,
+    page_id    TEXT NOT NULL,
+    written_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_notion_blocks_page ON notion_blocks(page_id);
 
 CREATE TABLE IF NOT EXISTS runs (
     run_id            INTEGER PRIMARY KEY AUTOINCREMENT,

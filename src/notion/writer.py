@@ -7,15 +7,20 @@ Step 3a is this file's connection check. Rendering and writing arrive in
 sets up the safety rule everything else depends on.
 
 THE SAFETY RULE
-    The page is rewritten on every run, so its whole content must be
-    content this agent wrote. Before replacing anything, check_page()
-    looks for blocks the agent did not create. If it finds any, the write
-    is refused rather than destroying something you typed. A mistyped page
-    id therefore fails loudly instead of quietly emptying a real page.
+    The agent records the id of every block it creates. On a later run it
+    deletes exactly those ids and nothing else, so a note, a sub-page or a
+    database you add to the page can never be destroyed by it - they were
+    never on the list.
 
-    The agent marks its own pages by making the FIRST block a specific
-    callout (see MARKER_TEXT). An empty page is fine too - that is what a
-    freshly made page looks like.
+    It refuses to touch a page that already has content it has no record of
+    writing, so a mistyped page id fails loudly instead of quietly emptying
+    a real page. An empty page is fine: that is what a fresh one looks like.
+
+    The MARKER_TEXT callout is a label, telling you what the page is. It is
+    deliberately NOT the safety mechanism: appends land at the end of a
+    page, so the moment you add a note of your own the marker stops being
+    first, and a marker-position rule would lock the agent out of its own
+    page.
 
 Check the connection any time with:
     python -m src.notion.writer --check
@@ -165,27 +170,51 @@ def is_agent_marker(block: dict) -> bool:
     return block.get("type") == "callout" and block_text(block).strip() == MARKER_TEXT
 
 
-def check_page(client, page_id: str | None = None) -> dict:
-    """Confirm the page exists and is safe to rewrite.
+def check_page(client, page_id: str | None = None, known_block_ids: list[str] | None = None) -> dict:
+    """Confirm the page exists and is safe to write to.
 
-    Returns a summary. Raises NotionError when the page holds content the
-    agent did not write - refusing is the whole point: a mistyped id must
-    not quietly empty a real page.
+    Safety comes from the record of what the agent previously wrote, not
+    from what the page looks like:
+
+      - the agent has written here before  -> safe. It will delete exactly
+        those recorded blocks and leave everything else alone.
+      - the page is empty                  -> safe. Nothing to lose.
+      - neither                            -> REFUSE. Content the agent has
+        no record of writing, so a mistyped page id would destroy it.
+
+    An earlier version required the agent's marker to be the FIRST block.
+    That was a heuristic from before block ids were recorded, and it was
+    wrong: appending happens at the end of a page, so as soon as you add a
+    note of your own the marker stops being first and the agent locks
+    itself out of its own page. The recorded ids are exact, so the position
+    of anything on the page no longer matters.
+
+    Returns a summary. `known_block_ids` is what the agent recorded writing
+    to this page; pass it whenever a database connection is available.
     """
     page_id = page_id or config.NOTION_PARENT_ID
     page = get_page(client, page_id)
     blocks = list_blocks(client, page_id)
+    known = set(known_block_ids or [])
 
-    if not blocks:
-        ownership = "empty"          # a fresh page: safe
-    elif is_agent_marker(blocks[0]):
-        ownership = "agent"          # ours: safe to replace
+    ours = [b for b in blocks if b.get("id") in known]
+    theirs = [b for b in blocks if b.get("id") not in known]
+
+    if ours:
+        ownership = "agent"      # written here before: the record is authoritative
+    elif known:
+        # A record exists but none of it is still on the page - you cleared
+        # it yourself. Safe, and worth distinguishing from a page the agent
+        # has never touched.
+        ownership = "cleared"
+    elif not blocks:
+        ownership = "empty"      # a fresh page, never written to
     else:
         raise NotionError(
-            f"Page {page_title(page)!r} already has {len(blocks)} block(s) that this agent "
-            "did not write, so rewriting it would destroy them.\n"
+            f"Page {page_title(page)!r} has {len(blocks)} block(s), and this agent has no "
+            "record of writing any of them - so it will not touch this page.\n"
             "  - If this is the wrong page, fix NOTION_PARENT_ID in .env.\n"
-            "  - If you want the agent to own this page, clear it in Notion first.\n"
+            "  - If you want the agent to use this page, clear it in Notion first.\n"
             f"  First block is a {blocks[0].get('type')}: {block_text(blocks[0])[:60]!r}"
         )
 
@@ -194,6 +223,8 @@ def check_page(client, page_id: str | None = None) -> dict:
         "title": page_title(page),
         "url": page.get("url"),
         "blocks": len(blocks),
+        "agent_blocks": len(ours),
+        "other_blocks": len(theirs),
         "ownership": ownership,
         "safe_to_write": True,
     }
@@ -307,11 +338,94 @@ def chunked(blocks: list[dict], size: int = MAX_CHILDREN_PER_APPEND) -> list[lis
     return [blocks[i:i + size] for i in range(0, len(blocks), size)]
 
 
+# --- writing ----------------------------------------------------------------
+
+def append_blocks(client, page_id: str, blocks: list[dict]) -> list[str]:
+    """Append blocks to the page and return the ids Notion assigned them.
+
+    Sent in batches of 100, which is Notion's documented per-request limit.
+    """
+    created: list[str] = []
+    for batch in chunked(blocks):
+        response = client.blocks.children.append(block_id=page_id, children=batch)
+        created.extend(item["id"] for item in response.get("results", []))
+    return created
+
+
+def delete_blocks(client, block_ids: list[str]) -> tuple[list[str], list[str]]:
+    """Delete these blocks. Returns (deleted, already_gone).
+
+    A block you deleted by hand in Notion is not an error - it is simply
+    gone, which is the outcome we wanted. Anything else is re-raised.
+    """
+    from notion_client.errors import APIResponseError
+
+    deleted: list[str] = []
+    already_gone: list[str] = []
+    for block_id in block_ids:
+        try:
+            client.blocks.delete(block_id=block_id)
+            deleted.append(block_id)
+        except APIResponseError as exc:
+            if exc.code in ("object_not_found", "validation_error"):
+                already_gone.append(block_id)
+            else:
+                raise
+    return deleted, already_gone
+
+
+def write_plan(conn, client, plan, page_id: str | None = None) -> dict:
+    """Replace the agent's content on the page with this plan.
+
+    The order matters. New blocks are appended FIRST, then the previously
+    recorded ones are deleted. If the append fails, the old page is still
+    intact and nothing has been lost; only a failure after a successful
+    append can leave both copies, which is visible and fixable. Deleting
+    first would risk an empty page.
+
+    Only blocks this agent recorded writing are deleted. Anything you add to
+    the page - a note, a sub-page, a database - is never touched, because it
+    was never on that list.
+
+    Returns a summary of what happened.
+    """
+    from src.db import queries
+
+    page_id = page_id or config.NOTION_PARENT_ID
+    previous = queries.get_notion_blocks(conn, page_id)
+
+    # Refuses if the page holds content the agent has no record of writing.
+    summary = check_page(client, page_id, known_block_ids=previous)
+
+    blocks = render_plan(plan)
+    created = append_blocks(client, page_id, blocks)
+    queries.record_notion_blocks(conn, page_id, created)
+
+    deleted, already_gone = delete_blocks(client, previous)
+    queries.forget_notion_blocks(conn, previous)
+
+    log.info(
+        "notion: wrote %d blocks, removed %d previous%s",
+        len(created), len(deleted),
+        f" ({len(already_gone)} already gone)" if already_gone else "",
+    )
+    return {
+        "written": len(created),
+        "deleted": len(deleted),
+        "already_gone": len(already_gone),
+        "page_id": page_id,
+        "url": summary["url"],
+        "other_blocks": summary["other_blocks"],
+    }
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser(description="Notion writer - connection check (reads only, writes nothing)")
     parser.add_argument("--check", action="store_true", help="verify the token and the target page")
     parser.add_argument("--preview", action="store_true",
                         help="render today's plan to Notion blocks and print them; writes nothing")
+    parser.add_argument("--write", action="store_true",
+                        help="actually write today's plan to the Notion page")
     args = parser.parse_args()
 
     sys.stdout.reconfigure(encoding="utf-8")
@@ -346,6 +460,28 @@ def _main() -> int:
         print("Nothing was written.")
         return 0
 
+    if args.write:
+        from src.db import schema
+        from src.rhythm.config import load_rhythm
+        from src.rhythm.today import build_plan
+
+        conn = schema.connect()
+        schema.init_db(conn)
+        try:
+            plan = build_plan(conn, load_rhythm())
+            result = write_plan(conn, get_client(), plan)
+        except NotionError as exc:
+            print(f"\nNOT WRITTEN:\n{exc}")
+            return 1
+        finally:
+            conn.close()
+
+        print(f"wrote {result['written']} blocks, removed {result['deleted']} previous")
+        if result["other_blocks"]:
+            print(f"left {result['other_blocks']} block(s) of your own untouched")
+        print(f"page: {result['url']}")
+        return 0
+
     if not args.check:
         parser.print_help()
         return 0
@@ -360,11 +496,22 @@ def _main() -> int:
         print(f"token      OK - integration {who['name']!r}"
               + (f" in workspace {who['workspace']!r}" if who["workspace"] else ""))
 
-        summary = check_page(client)
+        from src.db import schema
+        from src.db import queries as db_queries
+
+        conn = schema.connect()
+        schema.init_db(conn)
+        try:
+            known = db_queries.get_notion_blocks(conn, config.NOTION_PARENT_ID)
+        finally:
+            conn.close()
+
+        summary = check_page(client, known_block_ids=known)
         print(f"page       OK - {summary['title']!r}")
         print(f"           id     {summary['page_id']}")
         print(f"           url    {summary['url']}")
-        print(f"           blocks {summary['blocks']} ({summary['ownership']})")
+        print(f"           blocks {summary['blocks']} ({summary['ownership']}"
+              + (f", {summary['other_blocks']} yours" if summary["other_blocks"] else "") + ")")
         print("\nSafe to write. Nothing was written by this check.")
         return 0
     except NotionError as exc:

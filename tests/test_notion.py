@@ -109,41 +109,61 @@ def test_an_empty_page_is_safe_to_write():
     assert summary["blocks"] == 0
 
 
-def test_a_page_the_agent_already_owns_is_safe_to_rewrite():
-    blocks = [_marker_block(), _text_block("heading_1", "Wednesday")]
+def _owned(block_id: str, kind="paragraph", text="agent content") -> dict:
+    block = _text_block(kind, text)
+    block["id"] = block_id
+    return block
 
-    summary = writer.check_page(FakeNotion(blocks=blocks))
+
+def test_a_page_the_agent_has_written_to_before_is_safe():
+    blocks = [_owned("b1", "callout", MARKER_TEXT), _owned("b2", "heading_1", "Wednesday")]
+
+    summary = writer.check_page(FakeNotion(blocks=blocks), known_block_ids=["b1", "b2"])
 
     assert summary["ownership"] == "agent"
-    assert summary["blocks"] == 2
+    assert summary["agent_blocks"] == 2
+    assert summary["other_blocks"] == 0
 
 
-def test_a_page_with_your_own_content_is_refused():
+def test_a_page_with_content_the_agent_never_wrote_is_refused():
     """The whole point of the guard: never destroy something you typed."""
     blocks = [_text_block("paragraph", "My thesis notes, please do not delete")]
 
     with pytest.raises(NotionError) as excinfo:
-        writer.check_page(FakeNotion(blocks=blocks))
+        writer.check_page(FakeNotion(blocks=blocks), known_block_ids=[])
 
     message = str(excinfo.value)
-    assert "did not write" in message
+    assert "no record of writing" in message
     assert "NOTION_PARENT_ID" in message      # tells you how to fix it
     assert "thesis notes" in message          # shows what it found
 
 
-def test_the_marker_must_be_the_first_block():
-    """Content above the marker means someone typed at the top of the page."""
-    blocks = [_text_block("paragraph", "something I added"), _marker_block()]
+def test_your_own_blocks_alongside_the_agents_do_not_block_a_write():
+    """Regression: a marker-position rule locked the agent out of its own page.
 
-    with pytest.raises(NotionError, match="did not write"):
-        writer.check_page(FakeNotion(blocks=blocks))
+    Appends land at the END of a page, so after one write-then-delete cycle
+    anything you added sits ABOVE the marker. Requiring the marker to be
+    first made the agent refuse to ever write again.
+    """
+    blocks = [
+        _owned("yours", "paragraph", "MY OWN NOTE"),      # not in known ids
+        _owned("b1", "callout", MARKER_TEXT),
+        _owned("b2", "heading_1", "Thursday"),
+    ]
+
+    summary = writer.check_page(FakeNotion(blocks=blocks), known_block_ids=["b1", "b2"])
+
+    assert summary["ownership"] == "agent"
+    assert summary["agent_blocks"] == 2
+    assert summary["other_blocks"] == 1
 
 
-def test_a_lookalike_marker_of_the_wrong_type_does_not_count():
-    blocks = [_text_block("paragraph", MARKER_TEXT)]
+def test_a_page_you_cleared_by_hand_is_treated_as_fresh():
+    """You deleted the agent's blocks yourself; its record is simply stale."""
+    summary = writer.check_page(FakeNotion(blocks=[]), known_block_ids=["gone-1", "gone-2"])
 
-    with pytest.raises(NotionError, match="did not write"):
-        writer.check_page(FakeNotion(blocks=blocks))
+    assert summary["ownership"] == "cleared"
+    assert summary["safe_to_write"] is True
 
 
 # --- page problems ----------------------------------------------------------
@@ -453,3 +473,192 @@ def test_block_text_reads_both_the_send_and_receive_shapes():
     assert writer.block_text(received) == MARKER_TEXT
     assert writer.is_agent_marker(sent)
     assert writer.is_agent_marker(received)
+
+
+# ============================================================================
+# Writing. The safety property under test: the agent deletes ONLY blocks it
+# recorded writing, so nothing you add to the page can be destroyed.
+# ============================================================================
+
+class WritableNotion(FakeNotion):
+    """FakeNotion plus append and delete, tracking what is on the page."""
+
+    def __init__(self, blocks=None, append_error=None, delete_errors=None):
+        super().__init__(blocks=blocks)
+        self.page_blocks = list(blocks or [])
+        self.appended: list[dict] = []
+        self.deleted: list[str] = []
+        self._append_error = append_error
+        self._delete_errors = delete_errors or {}
+        self._next_id = 0
+        outer = self
+
+        class _Children:
+            def list(self, block_id, start_cursor=None):
+                return {"results": outer.page_blocks, "has_more": False, "next_cursor": None}
+
+            def append(self, block_id, children):
+                if outer._append_error:
+                    raise outer._append_error
+                results = []
+                for child in children:
+                    outer._next_id += 1
+                    made = {**child, "id": f"new-block-{outer._next_id}"}
+                    outer.page_blocks.append(made)
+                    outer.appended.append(made)
+                    results.append(made)
+                return {"results": results}
+
+        class _Blocks:
+            children = _Children()
+
+            def delete(self, block_id):
+                if block_id in outer._delete_errors:
+                    raise outer._delete_errors[block_id]
+                outer.deleted.append(block_id)
+                outer.page_blocks = [b for b in outer.page_blocks if b.get("id") != block_id]
+                return {"id": block_id, "archived": True}
+
+        self.blocks = _Blocks()
+
+
+PAGE = "11111111222233334444555555555555"
+
+
+def test_the_first_write_appends_and_records_every_block(db):
+    client = WritableNotion(blocks=[])
+
+    result = writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert result["written"] > 0
+    assert result["deleted"] == 0
+    assert queries.get_notion_blocks(db, PAGE) == [b["id"] for b in client.appended]
+
+
+def test_a_second_write_removes_exactly_the_first_ones(db):
+    client = WritableNotion(blocks=[])
+
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    first_ids = list(queries.get_notion_blocks(db, PAGE))
+
+    _add(db, "calendar:new", title="Something new", due_at="2026-09-21T06:00:00Z")
+    result = writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert sorted(client.deleted) == sorted(first_ids)
+    assert result["deleted"] == len(first_ids)
+    # Only the newest blocks remain recorded, and on the page.
+    assert set(queries.get_notion_blocks(db, PAGE)).isdisjoint(first_ids)
+    assert all(b["id"] not in first_ids for b in client.page_blocks)
+
+
+def test_running_twice_leaves_one_copy_not_two(db):
+    """Idempotent: the scheduler may run late, or run twice."""
+    client = WritableNotion(blocks=[])
+    plan = build_plan(db, _rhythm(), MONDAY)
+
+    writer.write_plan(db, client, plan, PAGE)
+    first_count = len(client.page_blocks)
+    writer.write_plan(db, client, plan, PAGE)
+
+    assert len(client.page_blocks) == first_count
+
+
+def test_blocks_the_agent_did_not_write_are_never_deleted(db):
+    """The core safety property. A note you typed must survive every run."""
+    client = WritableNotion(blocks=[])
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    # You add a note and a sub-page below the agent's content.
+    your_note = {"id": "your-note", "type": "paragraph",
+                 "paragraph": {"rich_text": [{"plain_text": "my own note"}]}}
+    your_subpage = {"id": "your-subpage", "type": "child_page", "child_page": {"title": "Notes"}}
+    client.page_blocks.extend([your_note, your_subpage])
+
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert "your-note" not in client.deleted
+    assert "your-subpage" not in client.deleted
+    assert your_note in client.page_blocks
+    assert your_subpage in client.page_blocks
+
+
+def test_a_page_of_unknown_content_is_refused_before_writing(db):
+    client = WritableNotion(blocks=[_text_block("paragraph", "My thesis notes")])
+
+    with pytest.raises(NotionError, match="no record of writing"):
+        writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert client.appended == []
+    assert client.deleted == []
+
+
+def test_the_agent_keeps_working_after_you_add_a_note(db):
+    """End-to-end version of the lockout regression, across two runs."""
+    client = WritableNotion(blocks=[])
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    client.page_blocks.append({"id": "your-note", "type": "paragraph",
+                               "paragraph": {"rich_text": [{"plain_text": "MY OWN NOTE"}]}})
+
+    # Two further runs must both succeed and both leave the note alone.
+    for _ in range(2):
+        result = writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+        assert result["other_blocks"] == 1
+
+    assert "your-note" not in client.deleted
+    assert any(b.get("id") == "your-note" for b in client.page_blocks)
+
+
+def test_a_failed_append_leaves_the_old_page_intact(db):
+    """Appending before deleting means a failure loses nothing."""
+    client = WritableNotion(blocks=[])
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    before = list(client.page_blocks)
+    recorded_before = queries.get_notion_blocks(db, PAGE)
+
+    client._append_error = _api_error("internal_server_error")
+
+    with pytest.raises(Exception):
+        writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert client.page_blocks == before          # nothing removed
+    assert client.deleted == []
+    assert queries.get_notion_blocks(db, PAGE) == recorded_before
+
+
+def test_a_block_already_deleted_by_hand_is_not_an_error(db):
+    client = WritableNotion(blocks=[])
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    first_ids = queries.get_notion_blocks(db, PAGE)
+
+    # You deleted one of the agent's blocks yourself in Notion.
+    client._delete_errors = {first_ids[0]: _api_error("object_not_found")}
+
+    result = writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert result["already_gone"] == 1
+    assert result["deleted"] == len(first_ids) - 1
+    # It is forgotten either way - it is gone, which is what we wanted.
+    assert first_ids[0] not in queries.get_notion_blocks(db, PAGE)
+
+
+def test_an_unexpected_delete_error_is_not_swallowed(db):
+    client = WritableNotion(blocks=[])
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    first_ids = queries.get_notion_blocks(db, PAGE)
+    client._delete_errors = {first_ids[0]: _api_error("rate_limited")}
+
+    with pytest.raises(Exception):
+        writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+
+def test_a_long_plan_is_appended_in_batches(db):
+    for i in range(120):
+        _add(db, f"calendar:e{i}", title=f"Event {i}",
+             due_at=f"2026-09-21T{6 + i % 12:02d}:00:00Z")
+
+    client = WritableNotion(blocks=[])
+    result = writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert result["written"] > 100        # more than one request was needed
+    assert len(queries.get_notion_blocks(db, PAGE)) == result["written"]
