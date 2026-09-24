@@ -4,9 +4,10 @@ Entry point - the one script the scheduler runs.
 Stages, in order:
     1. collect   sync Google Calendar and Classroom into SQLite   (V1 step 1)
     2. plan      work out what is relevant today, by rhythm       (V1 step 2)
+    3. notion    write the day plan to the Notion page            (V1 step 3)
 
-Later steps add the local model, the single Claude call, and the Notion
-write - in that order, behind this same file.
+Later steps add the local model and the single Claude call, behind this
+same file.
 
 Each stage is isolated: a collector failing does not stop the other, and
 neither stops the plan being built from whatever is already stored.
@@ -33,6 +34,8 @@ from collections.abc import Callable
 from src import config
 from src.collectors import calendar, classroom
 from src.db import queries, schema
+from src.notion import writer as notion_writer
+from src.notion.writer import NotionError
 from src.rhythm import today as rhythm_today
 from src.rhythm.config import RhythmError, load_rhythm
 
@@ -141,6 +144,7 @@ def run_pipeline(
     # nothing at all. A broken rhythm.toml is reported, never fatal: the
     # sync work above is already done and must not be lost.
     plan_outcome = {"ok": False, "items": None, "error": None}
+    plan = None
     try:
         rhythm = load_rhythm()
         plan = rhythm_today.build_plan(conn, rhythm)
@@ -165,6 +169,38 @@ def run_pipeline(
         log.exception("plan stage failed")
         results["plan"] = plan_outcome
 
+    # --- stage 3: write it to Notion ----------------------------------------
+    # Optional: with no Notion settings the pipeline still syncs and plans,
+    # and simply records that the write was not attempted. Isolated like the
+    # other stages, so a Notion outage never costs you the sync.
+    notion_outcome = {"ok": None, "written": None, "error": None}
+    if not config.notion_configured():
+        log.info("notion: not configured, skipping (set NOTION_API_KEY and NOTION_PARENT_ID in .env)")
+    elif plan is None:
+        # Recorded, so the run says WHY Notion was skipped rather than
+        # leaving it unexplained. ok stays None: skipped, not failed.
+        notion_outcome["error"] = "skipped, no plan to write"
+        results["notion"] = notion_outcome
+        log.warning("notion: skipped, the plan stage failed")
+    elif dry_run:
+        log.info("notion: dry run, nothing written")
+    else:
+        try:
+            result = notion_writer.write_plan(conn, notion_writer.get_client(), plan)
+            notion_outcome["ok"] = True
+            notion_outcome["written"] = result["written"]
+            results["notion"] = notion_outcome
+        except NotionError as exc:
+            notion_outcome["ok"] = False
+            notion_outcome["error"] = str(exc).splitlines()[0]
+            log.error("notion stage failed - %s", exc)
+            results["notion"] = notion_outcome
+        except Exception as exc:  # noqa: BLE001 - same isolation rule as the rest
+            notion_outcome["ok"] = False
+            notion_outcome["error"] = f"{type(exc).__name__}: {exc}"
+            log.exception("notion stage failed")
+            results["notion"] = notion_outcome
+
     if dry_run:
         # Discard everything the dry run loaded, including the rows the plan
         # was built from. Nothing reaches disk.
@@ -181,6 +217,7 @@ def run_pipeline(
             run_id,
             calendar_ok=results.get("calendar", {}).get("ok"),
             classroom_ok=results.get("classroom", {}).get("ok"),
+            notion_ok=notion_outcome["ok"],
             # Counted from what actually happened, not asserted. Nothing
             # calls Claude before step 5, so this reads 0 today - but it
             # will keep telling the truth once step 5 exists.
@@ -226,10 +263,13 @@ def main(argv: list[str] | None = None) -> int:
         print(rhythm_today.format_plan(plan))
         print()
 
-    summary = ", ".join(
-        f"{name} {'OK' if r['ok'] else 'FAILED'}" for name, r in results.items()
-    )
-    all_ok = all(r["ok"] for r in results.values())
+    def _state(outcome: dict) -> str:
+        if outcome.get("ok") is None:
+            return "skipped"      # not attempted is not a failure
+        return "OK" if outcome["ok"] else "FAILED"
+
+    summary = ", ".join(f"{name} {_state(r)}" for name, r in results.items())
+    all_ok = all(r.get("ok") is not False for r in results.values())
     log.info("run finished: %s", summary)
     return 0 if all_ok else 1
 

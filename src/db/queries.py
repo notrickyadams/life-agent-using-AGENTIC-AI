@@ -148,6 +148,7 @@ def finish_run(
     *,
     calendar_ok: bool | None = None,
     classroom_ok: bool | None = None,
+    notion_ok: bool | None = None,
     claude_calls_made: int = 0,
     plan_items: int | None = None,
     error: str | None = None,
@@ -164,12 +165,12 @@ def finish_run(
     conn.execute(
         """
         UPDATE runs
-        SET finished_at = ?, calendar_ok = ?, classroom_ok = ?,
+        SET finished_at = ?, calendar_ok = ?, classroom_ok = ?, notion_ok = ?,
             claude_calls_made = ?, plan_items = ?, error = ?
         WHERE run_id = ?
         """,
-        (utc_now_iso(), _flag(calendar_ok), _flag(classroom_ok), claude_calls_made,
-         plan_items, error, run_id),
+        (utc_now_iso(), _flag(calendar_ok), _flag(classroom_ok), _flag(notion_ok),
+         claude_calls_made, plan_items, error, run_id),
     )
     conn.commit()
 

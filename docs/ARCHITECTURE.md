@@ -86,10 +86,27 @@ data — feed it fake items and confirm routine tasks never reach the Claude
 API call.
 
 ### Notion writer
-Write-only in V1. Takes the agent loop's output and pushes it into a Notion
-page/database via the Notion API. No reads from Notion feed back into the
-system in V1 — that's a later-phase feature if I start editing things
-in Notion that the agent should notice.
+Write-only in V1, into a **page** (not a database): one page rewritten each
+run, so you open one bookmark and today is there. No reads from Notion feed
+back into the pipeline — that's a later-phase feature if I start editing
+things in Notion the agent should notice.
+
+**How it avoids destroying anything.** The writer records the id of every
+block it creates in the `notion_blocks` table, and a later run deletes
+exactly those ids. A note, sub-page or database you add to that page is
+never touched, because it was never on the list. It refuses outright to
+write to a page holding content it has no record of creating, so a mistyped
+page id fails loudly instead of quietly emptying a real page.
+
+New blocks are appended *before* the old ones are deleted: if the append
+fails the page is still intact, whereas deleting first would risk emptying
+it. The marker callout at the top is only a label — an earlier version used
+its position as the safety check, which locked the agent out of its own page
+as soon as anything was added below it, since appends land at the end.
+
+Items render as bullets rather than to-dos on purpose: a checkbox invites a
+click that would do nothing, because V1 never reads Notion back and the tick
+would be wiped on the next run.
 
 ## Trust / cost boundary
 

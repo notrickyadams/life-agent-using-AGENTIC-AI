@@ -177,3 +177,89 @@ def test_dry_run_does_not_stamp_a_sync(db):
     run_daily.run_pipeline(db, {"calendar": lambda **_: [_row("calendar:1")]}, dry_run=True)
 
     assert queries.last_successful_sync(db, "calendar") is None
+
+
+# --- the Notion stage -------------------------------------------------------
+
+def test_notion_is_skipped_when_not_configured(db, monkeypatch):
+    """Notion is optional: the pipeline still syncs and plans without it."""
+    monkeypatch.setattr(run_daily.config, "NOTION_API_KEY", "")
+    monkeypatch.setattr(run_daily.config, "NOTION_PARENT_ID", "")
+
+    results = run_daily.run_pipeline(db, {"calendar": lambda **_: [_row("calendar:1")]})
+
+    assert "notion" not in results          # not attempted
+    assert queries.get_latest_run(db)["notion_ok"] is None
+    assert queries.count_events(db) == 1    # the sync still happened
+
+
+def test_a_notion_failure_does_not_cost_the_sync(db, monkeypatch):
+    monkeypatch.setattr(run_daily.config, "NOTION_API_KEY", "ntn_fake")
+    monkeypatch.setattr(run_daily.config, "NOTION_PARENT_ID", "page")
+
+    def boom(*_a, **_k):
+        from src.notion.writer import NotionError
+        raise NotionError("Notion is unreachable")
+
+    monkeypatch.setattr(run_daily.notion_writer, "get_client", lambda: object())
+    monkeypatch.setattr(run_daily.notion_writer, "write_plan", boom)
+
+    results = run_daily.run_pipeline(db, {"calendar": lambda **_: [_row("calendar:1")]})
+
+    assert results["calendar"]["ok"] is True
+    assert queries.count_events(db) == 1            # rows still landed
+    assert results["notion"]["ok"] is False
+    assert "unreachable" in results["notion"]["error"]
+
+    run = queries.get_latest_run(db)
+    assert run["notion_ok"] == 0
+    assert "unreachable" in run["error"]
+
+
+def test_a_successful_notion_write_is_recorded(db, monkeypatch):
+    monkeypatch.setattr(run_daily.config, "NOTION_API_KEY", "ntn_fake")
+    monkeypatch.setattr(run_daily.config, "NOTION_PARENT_ID", "page")
+    monkeypatch.setattr(run_daily.notion_writer, "get_client", lambda: object())
+    monkeypatch.setattr(run_daily.notion_writer, "write_plan",
+                        lambda *a, **k: {"written": 7, "deleted": 5, "already_gone": 0,
+                                         "page_id": "page", "url": "u", "other_blocks": 0})
+
+    results = run_daily.run_pipeline(db, {"calendar": lambda **_: [_row("calendar:1")]})
+
+    assert results["notion"] == {"ok": True, "written": 7, "error": None}
+    assert queries.get_latest_run(db)["notion_ok"] == 1
+
+
+def test_notion_is_not_written_on_a_dry_run(db, monkeypatch):
+    monkeypatch.setattr(run_daily.config, "NOTION_API_KEY", "ntn_fake")
+    monkeypatch.setattr(run_daily.config, "NOTION_PARENT_ID", "page")
+
+    def must_not_run(*_a, **_k):
+        raise AssertionError("a dry run wrote to Notion")
+
+    monkeypatch.setattr(run_daily.notion_writer, "write_plan", must_not_run)
+
+    run_daily.run_pipeline(db, {"calendar": lambda **_: [_row("calendar:1")]}, dry_run=True)
+
+
+def test_notion_is_skipped_when_the_plan_stage_failed(db, monkeypatch):
+    """Nothing sensible to write, so do not write a half-page."""
+    monkeypatch.setattr(run_daily.config, "NOTION_API_KEY", "ntn_fake")
+    monkeypatch.setattr(run_daily.config, "NOTION_PARENT_ID", "page")
+
+    def must_not_run(*_a, **_k):
+        raise AssertionError("Notion was written without a plan")
+
+    monkeypatch.setattr(run_daily.notion_writer, "write_plan", must_not_run)
+
+    def broken_rhythm():
+        from src.rhythm.config import RhythmError
+        raise RhythmError("- [days.mondey] is not a weekday name")
+
+    monkeypatch.setattr(run_daily, "load_rhythm", broken_rhythm)
+
+    results = run_daily.run_pipeline(db, {"calendar": lambda **_: [_row("calendar:1")]})
+
+    assert results["plan"]["ok"] is False
+    assert results["notion"]["ok"] is None          # skipped, not failed
+    assert queries.count_events(db) == 1

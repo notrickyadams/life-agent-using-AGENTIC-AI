@@ -126,6 +126,9 @@ MIGRATIONS = [
     # finishes, so reading finished_at told it about the PREVIOUS run.
     ("runs", "calendar_synced_at", "TEXT"),
     ("runs", "classroom_synced_at", "TEXT"),
+    # Step 3d: did the Notion write succeed. NULL = not attempted, which is
+    # the honest answer when Notion is not configured.
+    ("runs", "notion_ok", "INTEGER"),
 ]
 
 
