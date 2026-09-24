@@ -23,7 +23,7 @@ def _marker_block() -> dict:
 def _page(title="Life Agent", archived=False, in_trash=False) -> dict:
     return {
         "object": "page",
-        "id": "3e576208-b43c-80dd-ba62-e85133b6bf05",
+        "id": "11111111-2222-3333-4444-555555555555",
         "archived": archived,
         "in_trash": in_trash,
         "url": "https://notion.so/example",
@@ -91,7 +91,7 @@ def _api_error(code: str):
 @pytest.fixture(autouse=True)
 def notion_settings(monkeypatch):
     monkeypatch.setattr(config, "NOTION_API_KEY", "ntn_fake")
-    monkeypatch.setattr(config, "NOTION_PARENT_ID", "3e576208b43c80ddba62e85133b6bf05")
+    monkeypatch.setattr(config, "NOTION_PARENT_ID", "11111111222233334444555555555555")
 
 
 # --- the overwrite guard ----------------------------------------------------

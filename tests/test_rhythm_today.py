@@ -567,3 +567,83 @@ def test_a_mirror_is_still_recognised_when_its_course_was_archived(db):
     plan = build_plan(db, make_rhythm(), TODAY)
 
     assert plan.total == 0, "an archived course's calendar event reappeared as a new item"
+
+
+# --- events that end exactly at midnight -----------------------------------
+
+def test_an_event_ending_at_midnight_does_not_reach_into_the_next_day(db):
+    """A Sunday 22:00-00:00 event is a Sunday event, not a Monday one."""
+    rhythm = make_rhythm()
+    add_event(db, "calendar:late", title="Sunday 22:00-00:00",
+              due_at="2026-09-20T19:00:00Z", end_at="2026-09-20T21:00:00Z")
+
+    sunday = build_plan(db, rhythm, date(2026, 9, 20))
+    monday = build_plan(db, rhythm, TODAY)
+
+    assert [i.title for i in sunday.today] == ["Sunday 22:00-00:00"]
+    assert monday.today == [], "an event ending at midnight leaked into the next day"
+
+
+def test_an_event_ending_after_midnight_does_span_both_days(db):
+    """00:30 is genuinely into the next day, unlike 00:00."""
+    rhythm = make_rhythm()
+    add_event(db, "calendar:party", title="Runs past midnight",
+              due_at="2026-09-20T19:00:00Z", end_at="2026-09-20T21:30:00Z")
+
+    assert [i.title for i in build_plan(db, rhythm, TODAY).today] == ["Runs past midnight"]
+
+
+# --- how an ongoing item is described --------------------------------------
+
+def test_an_ongoing_event_is_not_shown_as_starting_again(db):
+    """A conference that began Sunday must not claim to start 09:00 Monday."""
+    rhythm = make_rhythm()
+    add_event(db, "calendar:conf", title="Conference",
+              due_at="2026-09-20T06:00:00Z", end_at="2026-09-22T14:00:00Z")
+
+    item = build_plan(db, rhythm, TODAY).today[0]
+
+    assert item.started_earlier is True
+    assert "09:00" not in item.label
+    assert "ongoing" in item.label
+    assert "Tue 22 Sep" in item.label       # says when it ends
+
+
+def test_an_event_starting_today_still_shows_its_time(db):
+    rhythm = make_rhythm()
+    add_event(db, "calendar:lecture", title="Lecture",
+              due_at="2026-09-21T06:00:00Z", end_at="2026-09-21T07:30:00Z")
+
+    item = build_plan(db, rhythm, TODAY).today[0]
+
+    assert item.started_earlier is False
+    assert "09:00" in item.label
+
+
+def test_a_past_deadline_is_not_called_ongoing(db):
+    """Overdue work started earlier too, but it is over - show its time."""
+    rhythm = make_rhythm()
+    add_event(db, "classroom:c/1", title="Late", due_at="2026-09-19T20:59:00Z",
+              submission_state="CREATED")
+
+    item = build_plan(db, rhythm, TODAY).overdue[0]
+
+    assert item.started_earlier is False
+    assert "ongoing" not in item.label
+    assert "23:59" in item.label
+
+
+def test_ongoing_items_sort_before_items_that_start_today(db):
+    """Sorting by start date would put last week's conference above this
+    morning's lecture and make the times read out of order."""
+    rhythm = make_rhythm()
+    add_event(db, "calendar:conf", title="Conference",
+              due_at="2026-09-20T06:00:00Z", end_at="2026-09-22T14:00:00Z")
+    add_event(db, "calendar:morning", title="Morning lecture",
+              due_at="2026-09-21T06:00:00Z", end_at="2026-09-21T07:30:00Z")
+    add_event(db, "calendar:evening", title="Evening thing",
+              due_at="2026-09-21T19:00:00Z", end_at="2026-09-21T20:00:00Z")
+
+    titles = [i.title for i in build_plan(db, rhythm, TODAY).today]
+
+    assert titles == ["Conference", "Morning lecture", "Evening thing"]

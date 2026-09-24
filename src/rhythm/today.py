@@ -39,10 +39,10 @@ from src.rhythm.config import Day, Rhythm, RhythmError, load_rhythm
 
 log = logging.getLogger(__name__)
 
-# Google's SubmissionState values that mean "you still have to do this".
-# RECLAIMED_BY_STUDENT is an un-submit, so it needs action again.
+# Google's SubmissionState values that mean the work is finished. Everything
+# else from Classroom - NEW, CREATED, RECLAIMED_BY_STUDENT (an un-submit), or
+# no record at all - still counts as owed.
 # Reference: https://developers.google.com/workspace/classroom/reference/rest/v1/SubmissionState
-NEEDS_ACTION_STATES = frozenset({"NEW", "CREATED", "RECLAIMED_BY_STUDENT"})
 DONE_STATES = frozenset({"TURNED_IN", "RETURNED"})
 
 # The tags table records keyword matches under this source, so step 4's
@@ -73,6 +73,10 @@ class Item:
     # that happens at a single moment.
     local_end_date: date | None = None
     matched_keywords: tuple[str, ...] = ()
+    # Set when this item began before the day being planned. Its start time
+    # belongs to that earlier day, so showing it here would claim the event
+    # starts again this morning.
+    started_earlier: bool = False
 
     def spans(self, on: date) -> bool:
         """True when this item is in progress on `on`.
@@ -119,7 +123,14 @@ class Item:
         parts = []
         if with_date and self.local_date:
             parts.append(self.local_date.strftime("%a %d %b"))
-        if self.local_time:
+        if self.started_earlier:
+            # Began on an earlier day and is still running: say so rather
+            # than repeating a start time that has already happened.
+            if self.local_end_date:
+                parts.append(f"ongoing until {self.local_end_date.strftime('%a %d %b')}")
+            else:
+                parts.append("ongoing")
+        elif self.local_time:
             parts.append(self.local_time)
         name = f"{self.course_name}: {self.title}" if self.course_name else self.title
         parts.append(name)
@@ -243,15 +254,21 @@ def load_items(conn, rhythm: Rhythm) -> list[Item]:
 
         all_day = bool(row["all_day"])
         local_date, local_time = to_local_parts(row["due_at"], all_day, rhythm)
-        local_end_date, _ = to_local_parts(row["end_at"], all_day, rhythm)
+        local_end_date, local_end_time = to_local_parts(row["end_at"], all_day, rhythm)
 
         # Google gives an all-day event an EXCLUSIVE end date: a single-day
         # event on the 21st ends on the 22nd. Step back a day so the stored
         # end is the last day the event actually covers.
         if all_day and local_end_date is not None:
             local_end_date -= timedelta(days=1)
-            if local_date and local_end_date < local_date:
-                local_end_date = local_date
+        # A timed event ending at exactly 00:00 stops ON the boundary, so it
+        # does not occupy that day at all: a 22:00-00:00 Sunday event is not
+        # a Monday event. Same exclusive-end idea, for times.
+        elif not all_day and local_end_date is not None and local_end_time == "00:00":
+            local_end_date -= timedelta(days=1)
+
+        if local_date and local_end_date is not None and local_end_date < local_date:
+            local_end_date = local_date
 
         items.append(
             Item(
@@ -285,9 +302,16 @@ def _deadline_passed(item: Item, on: date, now_local: datetime, planning_today: 
 
 
 def _sort_key(item: Item) -> tuple:
-    """Sort by date, then by time (all-day items first within a day)."""
+    """Sort so a section reads in the order the day happens.
+
+    Items already under way come first - they have been running since before
+    this morning. After that it is by time, with all-day items ahead of timed
+    ones. Sorting by start date would put a conference that began last week
+    above this morning's lecture and make the times read out of order.
+    """
     return (
-        item.local_date or date.max,
+        0 if item.started_earlier else 1,
+        date.min if item.started_earlier else (item.local_date or date.max),
         item.local_time or "",
         item.title.lower(),
     )
@@ -319,6 +343,13 @@ def build_plan(conn, rhythm: Rhythm, on: date | None = None) -> DayPlan:
             if item.matched_keywords and item.needs_action:
                 plan.themed.append(item)
             continue
+
+        # Only something still running is "ongoing". A past deadline started
+        # earlier too, but it is over - it needs its time shown, not a word
+        # that says it is still going.
+        item.started_earlier = (
+            item.local_date is not None and item.local_date < on and item.spans(on)
+        )
 
         if item.spans(on):
             # Happening on this day - including a multi-day event that
