@@ -77,6 +77,10 @@ def setup_logging(verbose: bool = False) -> None:
     # calls they cover work. Silenced so a real warning is not lost in it.
     logging.getLogger("google.oauth2.credentials").setLevel(logging.ERROR)
 
+    # notion-client logs a line per HTTP request; keep the daily log readable.
+    for name in ("notion_client", "httpx"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
 
 def run_pipeline(
     conn,

@@ -12,5 +12,8 @@ python-dotenv==1.2.3
 # (standard library) cannot resolve names like "Africa/Cairo" without this.
 tzdata==2026.4
 
+# Notion API client, for writing the daily view (V1 step 3).
+notion-client==3.1.0
+
 # --- development only (tests) ---
 pytest==9.1.1

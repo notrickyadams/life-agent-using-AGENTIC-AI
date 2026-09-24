@@ -80,6 +80,27 @@ CLASSROOM_CALENDAR_PREFIX = "classroom"
 CALENDAR_DAYS_BACK: int = int(os.getenv("CALENDAR_DAYS_BACK", "7"))
 CALENDAR_DAYS_AHEAD: int = int(os.getenv("CALENDAR_DAYS_AHEAD", "30"))
 
+# --- Notion -----------------------------------------------------------------
+# Internal integration secret from https://www.notion.so/my-integrations
+# Kept out of source: it lives in .env, which is git-ignored.
+NOTION_API_KEY: str = os.getenv("NOTION_API_KEY", "").strip()
+
+# The page the daily view is written into. The 32-character id at the end of
+# the page URL. The integration must also be connected to that page:
+#     open the page -> ... menu -> Connections -> Connect to -> <integration>
+# Without that step the API reports the page as not found even though it exists.
+NOTION_PARENT_ID: str = os.getenv("NOTION_PARENT_ID", "").strip()
+
+
+def notion_configured() -> bool:
+    """True when both Notion settings are present.
+
+    Notion is optional up to step 3: the pipeline runs and builds a plan
+    without it, and simply skips the write.
+    """
+    return bool(NOTION_API_KEY and NOTION_PARENT_ID)
+
+
 # --- Local storage ----------------------------------------------------------
 # The single SQLite file that is the source of truth.
 DB_PATH: Path = _path(os.getenv("DB_PATH", "data/agent.db"))
@@ -108,13 +129,19 @@ def check() -> list[str]:
     if CALENDAR_DAYS_BACK < 0 or CALENDAR_DAYS_AHEAD < 0:
         problems.append("CALENDAR_DAYS_BACK and CALENDAR_DAYS_AHEAD must be 0 or more.")
 
+    # Notion is deliberately NOT required here. Half-configured is worth
+    # flagging, though - it usually means one line was pasted and one missed.
+    if bool(NOTION_API_KEY) != bool(NOTION_PARENT_ID):
+        missing = "NOTION_PARENT_ID" if NOTION_API_KEY else "NOTION_API_KEY"
+        problems.append(f"Notion is half-configured: {missing} is empty in .env.")
+
     return problems
 
 
 def _mask(name: str, value: object) -> str:
     """Hide the middle of anything that looks like a secret when printing."""
     text = str(value)
-    looks_secret = any(word in name.upper() for word in ("KEY", "SECRET", "TOKEN_VALUE"))
+    looks_secret = any(word in name.upper() for word in ("KEY", "SECRET", "TOKEN_VALUE", "API_KEY"))
     if looks_secret and len(text) > 8:
         return text[:4] + "..." + text[-4:]
     return text
@@ -130,6 +157,8 @@ def describe() -> str:
         "CALENDAR_INCLUDE_CLASSROOM": CALENDAR_INCLUDE_CLASSROOM,
         "CALENDAR_DAYS_BACK": CALENDAR_DAYS_BACK,
         "CALENDAR_DAYS_AHEAD": CALENDAR_DAYS_AHEAD,
+        "NOTION_API_KEY": NOTION_API_KEY,
+        "NOTION_PARENT_ID": NOTION_PARENT_ID,
         "DB_PATH": DB_PATH,
         "LOG_DIR": LOG_DIR,
     }
