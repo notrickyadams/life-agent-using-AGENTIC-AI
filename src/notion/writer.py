@@ -140,11 +140,24 @@ def list_blocks(client, page_id: str) -> list[dict]:
 
 
 def block_text(block: dict) -> str:
-    """The plain text of a block, or '' for blocks that have none."""
+    """The plain text of a block, or '' for blocks that have none.
+
+    Notion's API is asymmetric here: a block you SEND carries the text at
+    text.content, while a block you READ BACK carries it at plain_text. This
+    reads either, so the same function works on a block we just built and on
+    one Notion returned - which is what lets the marker we write be
+    recognised by the check that looks for it.
+    """
     body = block.get(block.get("type", ""), {})
     if not isinstance(body, dict):
         return ""
-    return "".join(part.get("plain_text", "") for part in body.get("rich_text", []))
+    pieces = []
+    for part in body.get("rich_text", []):
+        if part.get("plain_text"):
+            pieces.append(part["plain_text"])
+        else:
+            pieces.append((part.get("text") or {}).get("content", ""))
+    return "".join(pieces)
 
 
 def is_agent_marker(block: dict) -> bool:
@@ -186,14 +199,152 @@ def check_page(client, page_id: str | None = None) -> dict:
     }
 
 
+# --- rendering (pure - builds blocks, talks to nothing) ---------------------
+#
+# Notion's documented limits, which the helpers below respect:
+#   https://developers.notion.com/reference/request-limits
+#   https://developers.notion.com/reference/patch-block-children
+MAX_TEXT_CHARS = 2000        # one rich_text content field
+MAX_URL_CHARS = 2000
+MAX_RICH_TEXT_ITEMS = 100    # elements in a rich_text array
+MAX_CHILDREN_PER_APPEND = 100
+
+# Section headings, in the order they appear on the page.
+SECTION_TITLES = {
+    "overdue": "Overdue",
+    "today": "Today",
+    "due_soon": "Due soon",
+    "themed": "Fits today's theme",
+}
+
+
+def rich_text(content: str, link: str | None = None, bold: bool = False) -> dict:
+    """One rich_text element, truncated to what Notion accepts.
+
+    Truncating rather than letting the API reject the whole page: one
+    over-long title must not cost you the entire day's view.
+    """
+    text: dict = {"content": content[:MAX_TEXT_CHARS]}
+    if link and len(link) <= MAX_URL_CHARS:
+        text["link"] = {"url": link}
+    return {"type": "text", "text": text, "annotations": {"bold": bold}}
+
+
+def _block(kind: str, *rich: dict, **extra) -> dict:
+    """A Notion block of the given type holding these rich_text elements."""
+    body = {"rich_text": list(rich)[:MAX_RICH_TEXT_ITEMS], **extra}
+    return {"object": "block", "type": kind, kind: body}
+
+
+def marker_block() -> dict:
+    """The callout that identifies this page as the agent's.
+
+    check_page() looks for exactly this as the first block, and it tells you
+    in plain words that the page is replaced - so nothing typed here is lost
+    without warning.
+    """
+    return _block(
+        "callout",
+        rich_text(MARKER_TEXT),
+        icon={"type": "emoji", "emoji": "🤖"},
+        color="gray_background",
+    )
+
+
+def item_block(item, with_date: bool = False) -> dict:
+    """One plan item as a bullet, linking back to Google where possible."""
+    return _block("bulleted_list_item", rich_text(item.describe(with_date=with_date), link=item.link))
+
+
+def render_plan(plan) -> list[dict]:
+    """Turn a DayPlan into the blocks that make up the page.
+
+    Pure: builds a list and returns it. Nothing here touches Notion, so the
+    whole layout is testable without a network call or a real page.
+    """
+    from src.rhythm.today import describe_age
+
+    blocks: list[dict] = [marker_block()]
+
+    heading = plan.on.strftime("%A %d %B %Y")
+    if plan.day.has_theme:
+        heading += f"  -  {plan.day.theme}"
+    blocks.append(_block("heading_1", rich_text(heading)))
+
+    # Always state how current the underlying Google data is, so the page
+    # never silently implies "just now".
+    age = describe_age(plan.data_age_seconds)
+    blocks.append(_block("paragraph", rich_text(f"Google data: {age}")))
+
+    if plan.day.focus:
+        blocks.append(_block("quote", rich_text(plan.day.focus)))
+
+    for key, title in SECTION_TITLES.items():
+        items = getattr(plan, key)
+        if not items:
+            continue
+        label = f"{title} ({len(items)})"
+        if key == "themed" and plan.day.has_theme:
+            label = f"{title}: {plan.day.theme} ({len(items)})"
+        blocks.append(_block("heading_2", rich_text(label)))
+        # Everything outside Today belongs to another day, so name that day.
+        with_date = key != "today"
+        blocks.extend(item_block(item, with_date=with_date) for item in items)
+
+    if plan.is_empty:
+        blocks.append(_block("paragraph", rich_text("Nothing scheduled, nothing due.")))
+        if not plan.day.has_theme:
+            blocks.append(_block(
+                "paragraph",
+                rich_text(f"No theme set for {plan.day.name} - add one in rhythm.toml if you want one."),
+            ))
+
+    return blocks
+
+
+def chunked(blocks: list[dict], size: int = MAX_CHILDREN_PER_APPEND) -> list[list[dict]]:
+    """Split blocks into batches Notion will accept (100 children per append)."""
+    return [blocks[i:i + size] for i in range(0, len(blocks), size)]
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser(description="Notion writer - connection check (reads only, writes nothing)")
     parser.add_argument("--check", action="store_true", help="verify the token and the target page")
+    parser.add_argument("--preview", action="store_true",
+                        help="render today's plan to Notion blocks and print them; writes nothing")
     args = parser.parse_args()
 
     sys.stdout.reconfigure(encoding="utf-8")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     quiet_http_logs()
+
+    if args.preview:
+        from src.db import schema
+        from src.rhythm.config import load_rhythm
+        from src.rhythm.today import build_plan
+
+        conn = schema.connect()
+        schema.init_db(conn)
+        try:
+            blocks = render_plan(build_plan(conn, load_rhythm()))
+        finally:
+            conn.close()
+
+        print(f"{len(blocks)} blocks, {len(chunked(blocks))} append request(s):")
+        print()
+        for i, block in enumerate(blocks, 1):
+            kind = block["type"]
+            parts = block[kind].get("rich_text", [])
+            text = "".join(part["text"]["content"] for part in parts)
+            link = next(
+                (part["text"]["link"]["url"] for part in parts if part["text"].get("link")),
+                None,
+            )
+            line = f"  {i:2}. {kind:20} {text[:70]!r}"
+            print(line + (f"  -> {link[:50]}" if link else ""))
+        print()
+        print("Nothing was written.")
+        return 0
 
     if not args.check:
         parser.print_help()
