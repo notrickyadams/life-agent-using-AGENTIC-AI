@@ -305,3 +305,42 @@ def test_anything_urgent_does_get_a_summary(db, monkeypatch):
 
 def test_the_system_prompt_forbids_naming_absent_sections():
     assert "not present above" in synthesis.SYSTEM_PROMPT
+
+
+def test_a_summary_that_invents_overdue_work_is_flagged(db):
+    """Observed on the real page: with nothing overdue, llama3.1:8b wrote
+    "the Systems assignment is overdue" about work due nine days later.
+    Inventing urgency sends you to do the wrong thing first."""
+    plan = _busy_plan(db)
+    assert plan.overdue == []
+
+    complete, note = check_covers_overdue(
+        "Do the lecture first. The Systems assignment is overdue.", plan
+    )
+
+    assert complete is False
+    assert "calls something overdue when nothing is" in note
+
+
+def test_a_summary_with_nothing_overdue_and_no_such_claim_passes(db):
+    plan = _busy_plan(db)
+
+    assert check_covers_overdue("Start with the 09:30 lecture.", plan) == (True, "")
+
+
+def test_the_word_late_alone_does_not_trip_the_check(db):
+    """"running late" or "later today" must not read as an overdue claim."""
+    plan = _busy_plan(db)
+
+    assert check_covers_overdue("You can do this later today.", plan)[0] is True
+
+
+def test_later_is_not_read_as_late(db):
+    """Regression: "th-IS LATE-r today" matched the substring "is late", so
+    an ordinary sentence was read as claiming something was overdue."""
+    plan = _busy_plan(db)
+
+    for phrase in ["You can do this later today.",
+                   "Do it later.",
+                   "Deal with this in the latest session."]:
+        assert check_covers_overdue(phrase, plan) == (True, ""), phrase

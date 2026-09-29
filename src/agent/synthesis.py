@@ -33,6 +33,7 @@ THE COST RULE
 """
 
 import logging
+import re
 from dataclasses import dataclass
 
 from src import config
@@ -91,6 +92,12 @@ def build_prompt(plan) -> str:
     )
 
 
+# Words that mean "this is past its deadline". Matched on WORD BOUNDARIES,
+# not as substrings: "is late" appears inside "th-is late-r today", which
+# made an ordinary sentence read as a claim that something was overdue.
+_OVERDUE_WORDS = re.compile(r"\b(overdue|past due|late)\b", re.IGNORECASE)
+
+
 def check_covers_overdue(text: str, plan) -> tuple[bool, str]:
     """Check the one omission we have actually seen a model make.
 
@@ -102,13 +109,20 @@ def check_covers_overdue(text: str, plan) -> tuple[bool, str]:
     Deliberately forgiving: this is looking for a total omission, not
     grading the writing.
     """
+    claims_overdue = bool(_OVERDUE_WORDS.search(text))
+
     if not plan.overdue:
+        # The opposite failure, and the one actually seen: with nothing
+        # overdue, llama3.1:8b wrote "the Systems assignment is overdue"
+        # about work due nine days later. Inventing urgency is worse than
+        # omitting it - it sends you to do the wrong thing first.
+        if claims_overdue:
+            return False, "the summary calls something overdue when nothing is"
+        return True, ""
+    if claims_overdue:
         return True, ""
 
     lowered = text.lower()
-    if "overdue" in lowered or "late" in lowered or "past due" in lowered:
-        return True, ""
-
     for item in plan.overdue:
         words = [w for w in (item.title or "").lower().split() if len(w) > 3]
         words += [w for w in (item.course_name or "").lower().split() if len(w) > 3]
