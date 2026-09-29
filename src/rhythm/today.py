@@ -76,6 +76,9 @@ class Item:
     due_at: str | None
     local_date: date | None
     local_time: str | None
+    # End time of a timed event, local. Shown so a reader - or a model asked
+    # about clashes - can actually see that 09:30-11:00 overlaps 10:30-13:30.
+    local_end_time: str | None = None
     # End of a multi-day calendar event, in local terms. None for anything
     # that happens at a single moment.
     local_end_date: date | None = None
@@ -146,7 +149,12 @@ class Item:
             else:
                 parts.append("ongoing")
         elif self.local_time:
-            parts.append(self.local_time)
+            # An end time only when it is on the same day; a multi-day event
+            # already says "ongoing until ..." instead.
+            if self.local_end_time and self.local_end_date == self.local_date:
+                parts.append(f"{self.local_time}-{self.local_end_time}")
+            else:
+                parts.append(self.local_time)
         name = f"{self.course_name}: {self.title}" if self.course_name else self.title
         parts.append(name)
         if self.is_done:
@@ -331,6 +339,7 @@ def load_items(conn, rhythm: Rhythm) -> list[Item]:
                 local_date=local_date,
                 local_time=local_time,
                 local_end_date=local_end_date,
+                local_end_time=local_end_time,
                 description=_description_from(row["raw_json"]),
             )
         )

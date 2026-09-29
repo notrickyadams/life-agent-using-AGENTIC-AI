@@ -148,6 +148,39 @@ possible, with the expensive model reserved for judgement.
 | Hub-and-spoke | no | Phase 3+, if decomposition becomes unpredictable |
 | Autonomous loop | no | not planned — no bounded task needs one |
 
+## Synthesis: which model, and why it is a setting
+
+CLAUDE.md specifies step 5 as one Claude API call per day. It is built as a
+**setting** instead - `SYNTHESIS_MODEL` in `.env`, one of `ollama`,
+`claude`, or `none` - defaulting to the free local model. Decided 29 Sep, on
+evidence rather than preference, and it deviates in the cheaper direction:
+the paid path is still there, one call per run, enforced by
+`record_claude_call()` whichever backend is selected.
+
+What the evidence showed, on a deliberately busy test day:
+
+- Asked to summarise a day with an overdue lab report, llama3.1:8b wrote a
+  fluent answer that never mentioned it. With a system prompt defining each
+  section, it led with the overdue item correctly.
+- Shown a lecture at 09:30-11:00 and a lab at 10:30-13:30, it reported "no
+  conflict". The overlap is thirty minutes and plainly visible in the text.
+
+So the local model is usable and it misses things. Worth knowing before
+paying, and worth re-testing rather than assuming.
+
+**Why prose needs a different guardrail from classification.** Tagging is
+safe because the vocabulary is closed - anything unrecognised is discarded,
+so the worst case is no tag. A paragraph has nothing to check against, and a
+summary that quietly drops your overdue work reads exactly like a correct
+one. One specific failure is therefore checked: if the plan has overdue
+items and the summary names none of them, it is marked incomplete rather
+than shown as if it were fine. That does not make prose verifiable. It
+catches the mistake actually observed.
+
+**End times exist for this step.** Items render as `09:30-11:00`, not
+`09:30`, because the system prompt asks about clashes - and asking a model
+about something the text does not contain is how invention starts.
+
 ## Trust / cost boundary
 
 Everything above the Notion writer runs locally and costs nothing except the

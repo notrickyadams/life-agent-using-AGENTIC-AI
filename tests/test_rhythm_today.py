@@ -817,3 +817,37 @@ def test_the_sync_time_is_the_older_of_the_two_sources(db):
 
 def test_never_synced_leaves_the_timestamp_empty(db):
     assert build_plan(db, make_rhythm(), TODAY).synced_at is None
+
+
+# --- end times, so a clash is visible at all -------------------------------
+
+def test_a_timed_event_shows_when_it_ends(db):
+    """Asking a model about clashes while hiding end times invites invention."""
+    add_event(db, "calendar:lecture", title="Networks lecture",
+              due_at="2026-09-21T06:30:00Z", end_at="2026-09-21T08:00:00Z")
+
+    assert "09:30-11:00 Networks lecture" in build_plan(db, make_rhythm(), TODAY).today[0].label
+
+
+def test_an_assignment_deadline_shows_one_time_not_a_range(db):
+    add_event(db, "classroom:c/1", title="Problem set", due_at="2026-09-21T20:59:00Z",
+              submission_state="CREATED")
+
+    label = build_plan(db, make_rhythm(), TODAY).today[0].label
+    assert label.startswith("23:59 ")
+    assert "-" not in label.split(" ")[0]
+
+
+def test_an_event_running_past_midnight_says_ongoing_not_a_range(db):
+    add_event(db, "calendar:long", title="Long thing",
+              due_at="2026-09-21T19:00:00Z", end_at="2026-09-22T02:00:00Z")
+
+    label = build_plan(db, make_rhythm(), date(2026, 9, 22)).today[0].label
+    assert "ongoing" in label
+
+
+def test_an_all_day_event_has_no_time_range(db):
+    add_event(db, "calendar:allday", title="All day", due_at="2026-09-21",
+              end_at="2026-09-22", all_day=1)
+
+    assert build_plan(db, make_rhythm(), TODAY).today[0].label == "All day"

@@ -80,6 +80,25 @@ CLASSROOM_CALENDAR_PREFIX = "classroom"
 CALENDAR_DAYS_BACK: int = int(os.getenv("CALENDAR_DAYS_BACK", "7"))
 CALENDAR_DAYS_AHEAD: int = int(os.getenv("CALENDAR_DAYS_AHEAD", "30"))
 
+# --- Daily synthesis --------------------------------------------------------
+# Which model writes the short "what matters today" summary.
+#   ollama  the local model - free, private, decent but misses things
+#   claude  the Anthropic API - better at judgement, costs a few cents a month
+#   none    no summary at all; the plan alone is still a plan
+#
+# Defaults to ollama so the pipeline costs nothing until you decide otherwise.
+# Whichever is chosen, at most ONE paid call is ever made per run - the limit
+# lives in queries.record_claude_call(), not in this setting.
+SYNTHESIS_MODEL: str = os.getenv("SYNTHESIS_MODEL", "ollama").strip().lower()
+
+# Anthropic API key, needed only when SYNTHESIS_MODEL is "claude".
+# A separate budget from a Claude Pro subscription, which includes no API use.
+ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "").strip()
+
+# Which Claude model to use for that one call.
+ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5").strip()
+
+
 # --- Notion -----------------------------------------------------------------
 # Internal integration secret from https://www.notion.so/my-integrations
 # Kept out of source: it lives in .env, which is git-ignored.
@@ -144,6 +163,16 @@ def check() -> list[str]:
 
     # Notion is deliberately NOT required here. Half-configured is worth
     # flagging, though - it usually means one line was pasted and one missed.
+    if SYNTHESIS_MODEL not in ("ollama", "claude", "none"):
+        problems.append(
+            f"SYNTHESIS_MODEL is {SYNTHESIS_MODEL!r}; expected 'ollama', 'claude', or 'none'."
+        )
+    if SYNTHESIS_MODEL == "claude" and not ANTHROPIC_API_KEY:
+        problems.append(
+            "SYNTHESIS_MODEL is 'claude' but ANTHROPIC_API_KEY is empty in .env. "
+            "Get one from https://console.anthropic.com, or set SYNTHESIS_MODEL=ollama."
+        )
+
     if bool(NOTION_API_KEY) != bool(NOTION_PARENT_ID):
         missing = "NOTION_PARENT_ID" if NOTION_API_KEY else "NOTION_API_KEY"
         problems.append(f"Notion is half-configured: {missing} is empty in .env.")
@@ -170,6 +199,9 @@ def describe() -> str:
         "CALENDAR_INCLUDE_CLASSROOM": CALENDAR_INCLUDE_CLASSROOM,
         "CALENDAR_DAYS_BACK": CALENDAR_DAYS_BACK,
         "CALENDAR_DAYS_AHEAD": CALENDAR_DAYS_AHEAD,
+        "SYNTHESIS_MODEL": SYNTHESIS_MODEL,
+        "ANTHROPIC_API_KEY": ANTHROPIC_API_KEY,
+        "ANTHROPIC_MODEL": ANTHROPIC_MODEL,
         "OLLAMA_HOST": OLLAMA_HOST,
         "OLLAMA_MODEL": OLLAMA_MODEL,
         "NOTION_API_KEY": NOTION_API_KEY,
