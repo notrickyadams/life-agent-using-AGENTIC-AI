@@ -192,6 +192,11 @@ class DayPlan:
     # there - a relative age freezes and goes on claiming the data is fresh.
     synced_at: datetime | None = None
 
+    # The short "what to do first" line, when a model wrote one. None when
+    # synthesis is off, was skipped, or failed - all of which are fine: the
+    # sections below it are the plan, and this is commentary on them.
+    summary: object | None = None
+
     @property
     def is_empty(self) -> bool:
         """True when there is genuinely nothing to show - not merely nothing urgent."""
@@ -513,6 +518,12 @@ def format_plan(plan: DayPlan) -> str:
 
     if plan.day.focus:
         lines.append(f"focus: {plan.day.focus}")
+        lines.append("")
+
+    if plan.summary is not None and getattr(plan.summary, "usable", False):
+        lines.append(plan.summary.text)
+        if not plan.summary.complete:
+            lines.append(f"  (incomplete: {plan.summary.note})")
         lines.append("")
 
     sections = [

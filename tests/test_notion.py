@@ -951,3 +951,65 @@ def test_blocks_written_before_a_failure_are_still_recorded(db):
 
     assert recorded, "nothing was recorded, so the first batch is orphaned"
     assert sorted(recorded) == sorted(on_page)
+
+
+# --- the summary on the page ------------------------------------------------
+
+def _summary(text="Do the lab first, it is overdue.", complete=True, note=""):
+    from src.agent.synthesis import Summary
+
+    return Summary(text=text, backend="ollama", complete=complete, note=note)
+
+
+def test_the_summary_appears_above_the_sections(db):
+    """It answers "what do I do first"; the lists below are the evidence."""
+    _add(db, "classroom:late", title="Lab report", due_at="2026-09-18T20:59:00Z",
+         submission_state="CREATED")
+    plan = build_plan(db, _rhythm(), MONDAY)
+    plan.summary = _summary()
+
+    blocks = writer.render_plan(plan)
+    kinds = [b["type"] for b in blocks]
+    texts = _texts(blocks)
+
+    summary_at = next(i for i, t in enumerate(texts) if "Do the lab first" in t)
+    section_at = next(i for i, t in enumerate(texts) if t.startswith("Overdue ("))
+    assert summary_at < section_at
+    assert kinds[summary_at] == "callout"
+
+
+def test_an_incomplete_summary_says_so_on_the_page(db):
+    """A summary that dropped something reads exactly like a correct one, so
+    the reader has to be told to check the list."""
+    _add(db, "classroom:late", title="Lab report", due_at="2026-09-18T20:59:00Z",
+         submission_state="CREATED")
+    plan = build_plan(db, _rhythm(), MONDAY)
+    plan.summary = _summary(text="Have a productive day.", complete=False,
+                            note="the summary does not mention overdue work (Lab report)")
+
+    blocks = writer.render_plan(plan)
+    callout = next(b for b in blocks if "productive day" in _text_of(b))
+
+    assert "may be incomplete" in _text_of(callout)
+    assert "Check the list below" in _text_of(callout)
+    assert callout["callout"]["color"] == "yellow_background"
+
+
+def test_a_complete_summary_is_not_marked_as_doubtful(db):
+    _add(db, "classroom:late", title="Lab report", due_at="2026-09-18T20:59:00Z",
+         submission_state="CREATED")
+    plan = build_plan(db, _rhythm(), MONDAY)
+    plan.summary = _summary()
+
+    callout = next(b for b in writer.render_plan(plan) if "Do the lab first" in _text_of(b))
+
+    assert "may be incomplete" not in _text_of(callout)
+    assert callout["callout"]["color"] == "blue_background"
+
+
+def test_no_summary_means_no_extra_block(db):
+    _add(db, "calendar:now", title="Lecture", due_at="2026-09-21T06:00:00Z")
+    plan = build_plan(db, _rhythm(), MONDAY)
+
+    assert plan.summary is None
+    assert not any(b["type"] == "callout" and "💡" in str(b) for b in writer.render_plan(plan))

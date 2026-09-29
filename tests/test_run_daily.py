@@ -387,3 +387,87 @@ def test_a_dry_run_tags_for_display_but_stores_nothing(db, monkeypatch):
     run_daily.run_pipeline(db, {"calendar": lambda **_: [row]}, dry_run=True)
 
     assert db.execute("SELECT COUNT(*) AS n FROM tags").fetchone()["n"] == 0
+
+
+# --- the summary stage ------------------------------------------------------
+
+def _urgent_row(event_id="classroom:late"):
+    return {
+        "id": event_id, "source": "classroom", "type": "assignment",
+        "title": "Lab report", "due_at": "2020-01-01T09:00:00Z",
+        "submission_state": "CREATED", "raw_json": "{}",
+    }
+
+
+def test_a_dry_run_never_makes_a_paid_call(db, monkeypatch):
+    """A dry run writes nothing anywhere, and that includes spending money."""
+    monkeypatch.setattr(run_daily.config, "SYNTHESIS_MODEL", "claude")
+    monkeypatch.setattr(run_daily.config, "ANTHROPIC_API_KEY", "sk-ant-fake")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("a dry run made a paid call")
+
+    monkeypatch.setattr(run_daily.synthesis, "synthesise", must_not_run)
+
+    results = run_daily.run_pipeline(
+        db, {"classroom": lambda **_: [_urgent_row()]}, dry_run=True
+    )
+
+    assert "skipped" in results["summary"]["error"]
+
+
+def test_a_dry_run_still_gets_a_free_summary(db, monkeypatch):
+    """Free is free - a dry run should still show what it would say."""
+    monkeypatch.setattr(run_daily.config, "SYNTHESIS_MODEL", "ollama")
+    monkeypatch.setattr("src.agent.local_model.is_available", lambda: True)
+    monkeypatch.setattr("src.agent.local_model.generate",
+                        lambda *a, **k: "Do the overdue lab report first.")
+
+    results = run_daily.run_pipeline(
+        db, {"classroom": lambda **_: [_urgent_row()]}, dry_run=True
+    )
+
+    assert results["summary"]["ok"] is True
+    assert results["summary"]["backend"] == "ollama"
+
+
+def test_a_summary_failure_never_fails_the_run(db, monkeypatch):
+    monkeypatch.setattr(run_daily.config, "SYNTHESIS_MODEL", "ollama")
+
+    def boom(*a, **k):
+        raise RuntimeError("the model exploded")
+
+    monkeypatch.setattr(run_daily.synthesis, "synthesise", boom)
+
+    results = run_daily.run_pipeline(db, {"classroom": lambda **_: [_urgent_row()]})
+
+    assert results["classroom"]["ok"] is True
+    assert results["plan"]["ok"] is True
+    assert results["summary"]["ok"] is False
+
+
+def test_the_summary_is_skipped_when_nothing_needs_prioritising(db, monkeypatch):
+    monkeypatch.setattr(run_daily.config, "SYNTHESIS_MODEL", "ollama")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("a model was asked to rank nothing")
+
+    monkeypatch.setattr(run_daily.synthesis, "synthesise", must_not_run)
+
+    far = {**_urgent_row(), "due_at": "2099-01-01T09:00:00Z"}
+    results = run_daily.run_pipeline(db, {"classroom": lambda **_: [far]})
+
+    assert "summary" not in results
+
+
+def test_synthesis_off_means_no_summary_at_all(db, monkeypatch):
+    monkeypatch.setattr(run_daily.config, "SYNTHESIS_MODEL", "none")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("a model was called with synthesis off")
+
+    monkeypatch.setattr(run_daily.synthesis, "synthesise", must_not_run)
+
+    results = run_daily.run_pipeline(db, {"classroom": lambda **_: [_urgent_row()]})
+
+    assert "summary" not in results

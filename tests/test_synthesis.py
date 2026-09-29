@@ -121,7 +121,7 @@ def test_an_empty_plan_is_never_sent_to_a_model(db, monkeypatch):
     summary = synthesise(build_plan(db, _rhythm(), WEDNESDAY), backend="ollama")
 
     assert summary.text == ""
-    assert summary.note == "nothing to summarise"
+    assert summary.note == "nothing needs prioritising today"
 
 
 def test_an_unknown_backend_is_rejected(db):
@@ -268,3 +268,40 @@ def test_the_system_prompt_defines_every_section(db):
 
 def test_the_system_prompt_forbids_inventing_things():
     assert "Invent nothing" in synthesis.SYSTEM_PROMPT
+
+
+# --- nothing to prioritise --------------------------------------------------
+
+def test_a_day_with_only_distant_work_gets_no_summary(db, monkeypatch):
+    """The summary answers "what first". With nothing urgent there is no
+    first, and a model given nothing to rank invents something to rank:
+    llama3.1:8b replied "start with the DUE SOON section" when no such
+    section was on the page."""
+    def must_not_run(*a, **k):
+        raise AssertionError("a model was asked to rank nothing")
+
+    monkeypatch.setattr(synthesis, "_synthesise_with_ollama", must_not_run)
+    monkeypatch.setattr(synthesis, "_synthesise_with_claude", must_not_run)
+
+    _add(db, "classroom:far", title="Assignment 1", due_at="2026-11-30T20:59:00Z",
+         submission_state="CREATED")
+    plan = build_plan(db, _rhythm(), WEDNESDAY)
+
+    summary = synthesise(plan, backend="ollama")
+
+    assert plan.later                      # there IS work listed
+    assert summary.usable is False
+    assert summary.note == "nothing needs prioritising today"
+
+
+def test_anything_urgent_does_get_a_summary(db, monkeypatch):
+    monkeypatch.setattr("src.agent.local_model.is_available", lambda: True)
+    monkeypatch.setattr("src.agent.local_model.generate", lambda *a, **k: "Do the lab, it is overdue.")
+
+    summary = synthesise(_plan_with_overdue(db), backend="ollama")
+
+    assert summary.usable is True
+
+
+def test_the_system_prompt_forbids_naming_absent_sections():
+    assert "not present above" in synthesis.SYSTEM_PROMPT

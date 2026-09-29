@@ -366,6 +366,26 @@ def render_plan(plan, warnings: list[str] | None = None) -> list[dict]:
     if plan.day.focus:
         blocks.append(_block("quote", rich_text(plan.day.focus)))
 
+    # The summary sits above the sections: it is the answer to "what do I do
+    # first", and the lists below are the evidence for it.
+    summary = getattr(plan, "summary", None)
+    if summary is not None and getattr(summary, "usable", False):
+        text = summary.text
+        if not summary.complete:
+            # Said plainly on the page. A summary that quietly dropped
+            # something reads exactly like a correct one, so the reader has
+            # to be told to go and check the lists themselves.
+            text += (
+                "\n\nThis summary may be incomplete - "
+                f"{summary.note}. Check the list below."
+            )
+        blocks.append(_block(
+            "callout",
+            rich_text(text),
+            icon={"type": "emoji", "emoji": "💡"},
+            color="yellow_background" if not summary.complete else "blue_background",
+        ))
+
     for key, title in SECTION_TITLES.items():
         items = getattr(plan, key)
         if not items:

@@ -5,9 +5,12 @@ Stages, in order:
     1. collect   sync Google Calendar and Classroom into SQLite   (V1 step 1)
     2. plan      work out what is relevant today, by rhythm       (V1 step 2)
     3. tag       label each item with the local model, free       (V1 step 4)
-    4. notion    write the day plan to the Notion page            (V1 step 3)
+    4. summary   one short "what to do first"                     (V1 step 5)
+    5. notion    write the day plan to the Notion page            (V1 step 3)
 
-The single paid Claude call joins as step 5, behind this same file.
+Which model writes the summary is a setting, SYNTHESIS_MODEL, defaulting to
+the free local one. Whichever is chosen, at most ONE paid call happens per
+run - and a dry run never makes a paid call at all.
 
 Each stage is isolated: a collector failing does not stop the other, and
 neither stops the plan being built from whatever is already stored.
@@ -35,7 +38,7 @@ from src import config
 from src.collectors import calendar, classroom
 from src.collectors.google_auth import SignInRequired
 from src.db import queries, schema
-from src.agent import tagger
+from src.agent import synthesis, tagger
 from src.notion import writer as notion_writer
 from src.notion.writer import NotionError
 from src.rhythm import today as rhythm_today
@@ -210,7 +213,47 @@ def run_pipeline(
             results["tag"] = tag_outcome
             log.exception("tagging failed")
 
-    # --- stage 4: write it to Notion ----------------------------------------
+    # --- stage 4: the one short summary --------------------------------------
+    # Optional in every sense: a failure here, a missing model, or the
+    # setting turned off all leave you with the full plan, which is the
+    # actual product. The summary is commentary on it.
+    synthesis_outcome = {"ok": None, "backend": None, "complete": None, "error": None}
+    paid_calls = 0
+    if plan is None or plan.urgent_total == 0:
+        # Nothing needs ordering, so there is no "what first" to answer.
+        log.debug("no summary: nothing needs prioritising")
+    elif config.SYNTHESIS_MODEL == "none":
+        log.debug("no summary: SYNTHESIS_MODEL is 'none'")
+    elif dry_run and config.SYNTHESIS_MODEL == "claude":
+        # A dry run must not spend money. The free backend still runs, so a
+        # dry run shows you a real summary whenever one is free.
+        log.info("summary: skipped, a dry run never makes a paid call")
+        synthesis_outcome["error"] = "skipped, a dry run never makes a paid call"
+        # Recorded, so the run says WHY there is no summary. ok stays None:
+        # skipped, not failed.
+        results["summary"] = synthesis_outcome
+    else:
+        try:
+            summary = synthesis.synthesise(
+                plan, conn=conn, run_id=run_id if not dry_run else None
+            )
+            plan.summary = summary
+            paid_calls = summary.claude_calls
+            synthesis_outcome.update(ok=True, backend=summary.backend, complete=summary.complete)
+            results["summary"] = synthesis_outcome
+            log.info("summary: %s wrote %d characters%s",
+                     summary.backend, len(summary.text),
+                     "" if summary.complete else f" (incomplete: {summary.note})")
+        except synthesis.SynthesisError as exc:
+            synthesis_outcome["error"] = str(exc).splitlines()[0]
+            log.warning("summary skipped: %s", exc)
+            results["summary"] = synthesis_outcome
+        except Exception as exc:  # noqa: BLE001 - commentary must never fail a run
+            synthesis_outcome.update(ok=False, error=f"{type(exc).__name__}: {exc}")
+            results["summary"] = synthesis_outcome
+            log.exception("summary failed")
+
+    # --- stage 5: write it to Notion ----------------------------------------
     # Optional: with no Notion settings the pipeline still syncs and plans,
     # and simply records that the write was not attempted. Isolated like the
     # other stages, so a Notion outage never costs you the sync.
@@ -286,7 +329,8 @@ def run_pipeline(
             # Counted from what actually happened, not asserted. Nothing
             # calls Claude before step 5, so this reads 0 today - but it
             # will keep telling the truth once step 5 exists.
-            claude_calls_made=queries.count_claude_calls(conn, run_id),
+            # Counted from what actually happened, not asserted.
+            claude_calls_made=queries.count_claude_calls(conn, run_id) or paid_calls,
             plan_items=plan_outcome["items"],
             error="; ".join(errors) or None,
         )

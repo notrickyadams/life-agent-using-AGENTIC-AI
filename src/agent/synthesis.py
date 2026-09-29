@@ -53,7 +53,8 @@ SYSTEM_PROMPT = (
     "Rules you must follow:\n"
     "  - If anything is OVERDUE, it comes first and you must say so.\n"
     "  - Never describe a LATER item as urgent or overdue.\n"
-    "  - Mention only what the plan shows. Invent nothing.\n"
+    "  - Mention only what the plan shows. Invent nothing, and never refer\n"
+    "    to a section that is not present above.\n"
     "  - Point out clashes between times if there are any.\n"
     f"  - At most {MAX_SENTENCES} sentences. No preamble, no bullet points."
 )
@@ -188,10 +189,15 @@ def synthesise(plan, backend: str | None = None, conn=None, run_id: int | None =
     if backend == "none":
         return Summary(text="", backend="none")
 
-    if plan.is_empty:
-        # Nothing to reason about, and no model should be paid or asked to
-        # write a paragraph about an empty list.
-        return Summary(text="", backend=backend, note="nothing to summarise")
+    if plan.urgent_total == 0:
+        # Nothing needs ordering. The summary exists to say what to do FIRST,
+        # and with only distant work listed there is no first - the list
+        # already says everything there is to say.
+        #
+        # Asked anyway, llama3.1:8b replied "you can start with the DUE SOON
+        # section" when no such section was on the page. A model given
+        # nothing to rank will invent something to rank.
+        return Summary(text="", backend=backend, note="nothing needs prioritising today")
 
     prompt = build_prompt(plan)
 
