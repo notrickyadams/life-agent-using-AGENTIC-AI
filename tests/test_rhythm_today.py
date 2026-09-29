@@ -647,3 +647,43 @@ def test_ongoing_items_sort_before_items_that_start_today(db):
     titles = [i.title for i in build_plan(db, rhythm, TODAY).today]
 
     assert titles == ["Conference", "Morning lecture", "Evening thing"]
+
+
+# --- the description carried on each item -----------------------------------
+
+def test_an_item_carries_the_description_google_stored(db):
+    """Without this the local model has only 'Assignment 1' to go on."""
+    import json as json_module
+
+    raw = json_module.dumps({"title": "Assignment 1",
+                             "description": "Submit your  lab   report\nfor experiment 2"})
+    add_event(db, "classroom:c/1", title="Assignment 1",
+              due_at="2026-09-21T20:59:00Z", submission_state="CREATED", raw_json=raw)
+
+    item = build_plan(db, make_rhythm(), TODAY).today[0]
+
+    # Whitespace collapsed, so the prompt is not padded with newlines.
+    assert item.description == "Submit your lab report for experiment 2"
+
+
+def test_an_item_with_no_description_gets_an_empty_string(db):
+    add_event(db, "calendar:1", title="Lecture", due_at="2026-09-21T06:00:00Z")
+
+    assert build_plan(db, make_rhythm(), TODAY).today[0].description == ""
+
+
+def test_unreadable_raw_json_does_not_break_loading(db):
+    add_event(db, "calendar:1", title="Lecture", due_at="2026-09-21T06:00:00Z",
+              raw_json="not json at all")
+
+    assert build_plan(db, make_rhythm(), TODAY).today[0].description == ""
+
+
+def test_a_long_description_is_trimmed(db):
+    import json as json_module
+
+    raw = json_module.dumps({"description": "word " * 500})
+    add_event(db, "classroom:c/1", title="A", due_at="2026-09-21T20:59:00Z",
+              submission_state="CREATED", raw_json=raw)
+
+    assert len(build_plan(db, make_rhythm(), TODAY).today[0].description) <= 400

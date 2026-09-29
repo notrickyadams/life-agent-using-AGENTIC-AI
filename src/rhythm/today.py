@@ -30,6 +30,7 @@ states how old its data is, and says so loudly when that is stale.
 """
 
 import argparse
+import json
 import logging
 import sys
 from dataclasses import dataclass, field
@@ -72,6 +73,10 @@ class Item:
     # End of a multi-day calendar event, in local terms. None for anything
     # that happens at a single moment.
     local_end_date: date | None = None
+    # What Google wrote about this item, trimmed. Often the only thing that
+    # distinguishes "Assignment 1" the lab report from "Assignment 1" the
+    # problem set, so the local model needs it to classify anything.
+    description: str = ""
     matched_keywords: tuple[str, ...] = ()
     # Set when this item began before the day being planned. Its start time
     # belongs to that earlier day, so showing it here would claim the event
@@ -222,6 +227,24 @@ def to_local_parts(due_at: str | None, all_day: bool, rhythm: Rhythm) -> tuple[d
     return local.date(), local.strftime("%H:%M")
 
 
+def _description_from(raw_json: str | None) -> str:
+    """Pull the description out of a stored Google record.
+
+    Whitespace collapsed and cut to a few hundred characters: a long
+    description costs the local model time to read and adds nothing to a
+    one-word classification.
+    """
+    if not raw_json:
+        return ""
+    try:
+        data = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return " ".join((data.get("description") or "").split())[:400]
+
+
 def load_items(conn, rhythm: Rhythm) -> list[Item]:
     """Read every active row and prepare it, dropping mirrored duplicates.
 
@@ -233,7 +256,7 @@ def load_items(conn, rhythm: Rhythm) -> list[Item]:
     rows = conn.execute(
         """
         SELECT id, source, type, title, course_name, submission_state, link,
-               all_day, due_at, end_at, duplicate_of
+               all_day, due_at, end_at, duplicate_of, raw_json
         FROM events
         WHERE active = 1
         """
@@ -284,6 +307,7 @@ def load_items(conn, rhythm: Rhythm) -> list[Item]:
                 local_date=local_date,
                 local_time=local_time,
                 local_end_date=local_end_date,
+                description=_description_from(row["raw_json"]),
             )
         )
     return items
