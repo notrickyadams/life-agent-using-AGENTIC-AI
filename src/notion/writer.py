@@ -287,15 +287,50 @@ def item_block(item, with_date: bool = False) -> dict:
     return _block("bulleted_list_item", rich_text(item.describe(with_date=with_date), link=item.link))
 
 
-def render_plan(plan) -> list[dict]:
+def warning_block(text: str) -> dict:
+    """A callout that is hard to miss.
+
+    Used for anything meaning "what you are reading may be wrong". Red,
+    because the failure it reports is silent by nature: a page showing
+    three-day-old data looks exactly like a page showing today's.
+    """
+    return _block(
+        "callout",
+        rich_text(text),
+        icon={"type": "emoji", "emoji": "⚠️"},
+        color="red_background",
+    )
+
+
+def render_plan(plan, warnings: list[str] | None = None) -> list[dict]:
     """Turn a DayPlan into the blocks that make up the page.
 
     Pure: builds a list and returns it. Nothing here touches Notion, so the
     whole layout is testable without a network call or a real page.
-    """
-    from src.rhythm.today import describe_age
 
-    blocks: list[dict] = [marker_block()]
+    `warnings` are things the run could not do - most importantly, that
+    Google needs you to sign in again. They go at the very top, above the
+    marker, because a page that quietly shows stale data is the one failure
+    mode you would never notice on your own.
+    """
+    from src.rhythm.today import STALE_AFTER_SECONDS, describe_age
+
+    blocks: list[dict] = []
+
+    for text in warnings or []:
+        blocks.append(warning_block(text))
+
+    # Stale data gets its own warning even when nothing reported an error -
+    # a laptop that was simply off for three days produces no failure at all,
+    # just an old page.
+    age_seconds = plan.data_age_seconds
+    if age_seconds is None or age_seconds > STALE_AFTER_SECONDS:
+        blocks.append(warning_block(
+            f"This is not today's data - Google was last read {describe_age(age_seconds)}. "
+            "Run: python -m src.run_daily"
+        ))
+
+    blocks.append(marker_block())
 
     heading = plan.on.strftime("%A %d %B %Y")
     if plan.day.has_theme:
@@ -304,8 +339,7 @@ def render_plan(plan) -> list[dict]:
 
     # Always state how current the underlying Google data is, so the page
     # never silently implies "just now".
-    age = describe_age(plan.data_age_seconds)
-    blocks.append(_block("paragraph", rich_text(f"Google data: {age}")))
+    blocks.append(_block("paragraph", rich_text(f"Google data: {describe_age(age_seconds)}")))
 
     if plan.day.focus:
         blocks.append(_block("quote", rich_text(plan.day.focus)))
@@ -374,7 +408,8 @@ def delete_blocks(client, block_ids: list[str]) -> tuple[list[str], list[str]]:
     return deleted, already_gone
 
 
-def write_plan(conn, client, plan, page_id: str | None = None) -> dict:
+def write_plan(conn, client, plan, page_id: str | None = None,
+               warnings: list[str] | None = None) -> dict:
     """Replace the agent's content on the page with this plan.
 
     The order matters. New blocks are appended FIRST, then the previously
@@ -387,6 +422,8 @@ def write_plan(conn, client, plan, page_id: str | None = None) -> dict:
     the page - a note, a sub-page, a database - is never touched, because it
     was never on that list.
 
+    `warnings` are surfaced at the top of the page - see render_plan.
+
     Returns a summary of what happened.
     """
     from src.db import queries
@@ -397,7 +434,7 @@ def write_plan(conn, client, plan, page_id: str | None = None) -> dict:
     # Refuses if the page holds content the agent has no record of writing.
     summary = check_page(client, page_id, known_block_ids=previous)
 
-    blocks = render_plan(plan)
+    blocks = render_plan(plan, warnings)
     created = append_blocks(client, page_id, blocks)
     queries.record_notion_blocks(conn, page_id, created)
 

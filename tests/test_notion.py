@@ -286,12 +286,13 @@ def _kinds(blocks) -> list[str]:
 
 # --- structure --------------------------------------------------------------
 
-def test_the_marker_is_always_the_first_block(db):
-    """check_page() identifies the agent's page by this, so it must lead."""
+def test_the_page_carries_the_agent_marker(db):
+    """A label saying what the page is. Its POSITION is deliberately not
+    load-bearing - warnings sit above it, and safety comes from recorded
+    block ids, not from what happens to be first."""
     blocks = writer.render_plan(build_plan(db, _rhythm(), MONDAY))
 
-    assert blocks[0]["type"] == "callout"
-    assert writer.is_agent_marker(blocks[0])
+    assert any(writer.is_agent_marker(b) for b in blocks)
 
 
 def test_the_heading_names_the_day_and_theme(db):
@@ -662,3 +663,77 @@ def test_a_long_plan_is_appended_in_batches(db):
 
     assert result["written"] > 100        # more than one request was needed
     assert len(queries.get_notion_blocks(db, PAGE)) == result["written"]
+
+
+# --- warnings on the page ---------------------------------------------------
+
+def test_stale_data_is_flagged_on_the_page_not_just_the_terminal(db):
+    """The gap that mattered: the terminal said STALE, the page did not.
+    Notion is the surface actually looked at."""
+    from src.rhythm.today import STALE_AFTER_SECONDS
+
+    plan = build_plan(db, _rhythm(), MONDAY)
+    plan.data_age_seconds = STALE_AFTER_SECONDS + 1
+
+    blocks = writer.render_plan(plan)
+
+    warnings = [b for b in blocks if b["type"] == "callout"
+                and b["callout"].get("color") == "red_background"]
+    assert len(warnings) == 1
+    assert "not today's data" in _text_of(warnings[0])
+    assert "python -m src.run_daily" in _text_of(warnings[0])
+
+
+def test_fresh_data_gets_no_warning(db):
+    plan = build_plan(db, _rhythm(), MONDAY)
+    plan.data_age_seconds = 30
+
+    blocks = writer.render_plan(plan)
+
+    assert not [b for b in blocks if b["type"] == "callout"
+                and b["callout"].get("color") == "red_background"]
+
+
+def test_never_synced_counts_as_stale(db):
+    plan = build_plan(db, _rhythm(), MONDAY)
+    plan.data_age_seconds = None
+
+    texts = _texts(writer.render_plan(plan))
+
+    assert any("not today's data" in t for t in texts)
+
+
+def test_a_signin_warning_appears_at_the_very_top(db):
+    """Above everything, because it explains why the rest may be wrong."""
+    plan = build_plan(db, _rhythm(), MONDAY)
+    plan.data_age_seconds = 30
+
+    blocks = writer.render_plan(plan, warnings=["Google needs you to sign in again"])
+
+    assert blocks[0]["type"] == "callout"
+    assert "sign in again" in _text_of(blocks[0])
+    assert blocks[0]["callout"]["color"] == "red_background"
+
+
+def test_warnings_and_staleness_can_both_appear(db):
+    from src.rhythm.today import STALE_AFTER_SECONDS
+
+    plan = build_plan(db, _rhythm(), MONDAY)
+    plan.data_age_seconds = STALE_AFTER_SECONDS + 1
+
+    blocks = writer.render_plan(plan, warnings=["Google needs you to sign in again"])
+    reds = [b for b in blocks if b["type"] == "callout"
+            and b["callout"].get("color") == "red_background"]
+
+    assert len(reds) == 2
+    assert "sign in" in _text_of(reds[0])        # the cause comes first
+    assert "not today's data" in _text_of(reds[1])
+
+
+def test_warnings_are_written_through_to_the_page(db):
+    client = WritableNotion(blocks=[])
+
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE,
+                      warnings=["Google needs you to sign in again"])
+
+    assert any("sign in again" in writer.block_text(b) for b in client.page_blocks)

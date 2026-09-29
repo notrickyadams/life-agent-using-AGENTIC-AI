@@ -25,7 +25,9 @@ def test_one_failing_collector_does_not_stop_the_other(db):
 
     results = run_daily.run_pipeline(db, {"calendar": good, "classroom": bad})
 
-    assert results["calendar"] == {"ok": True, "rows": 2, "inactive": 0, "error": None}
+    assert results["calendar"] == {
+        "ok": True, "rows": 2, "inactive": 0, "error": None, "needs_signin": False
+    }
     assert results["classroom"]["ok"] is False
     assert "Classroom API exploded" in results["classroom"]["error"]
     assert queries.count_events(db) == 2                     # the good one's rows landed
@@ -263,3 +265,82 @@ def test_notion_is_skipped_when_the_plan_stage_failed(db, monkeypatch):
     assert results["plan"]["ok"] is False
     assert results["notion"]["ok"] is None          # skipped, not failed
     assert queries.count_events(db) == 1
+
+
+# --- warnings reaching the Notion page --------------------------------------
+
+def test_an_expired_google_signin_is_surfaced_on_the_notion_page(db, monkeypatch):
+    """The failure that happens weekly. A stale page looks exactly like a
+    current one, so the page itself has to say so."""
+    from src.collectors.google_auth import SignInRequired
+
+    monkeypatch.setattr(run_daily.config, "NOTION_API_KEY", "ntn_fake")
+    monkeypatch.setattr(run_daily.config, "NOTION_PARENT_ID", "page")
+    monkeypatch.setattr(run_daily.notion_writer, "get_client", lambda: object())
+
+    captured = {}
+
+    def fake_write(conn, client, plan, page_id=None, warnings=None):
+        captured["warnings"] = warnings
+        return {"written": 1, "deleted": 0, "already_gone": 0,
+                "page_id": "page", "url": "u", "other_blocks": 0}
+
+    monkeypatch.setattr(run_daily.notion_writer, "write_plan", fake_write)
+
+    def needs_signin(**_):
+        raise SignInRequired("calendar needs you to sign in again")
+
+    results = run_daily.run_pipeline(
+        db, {"calendar": needs_signin, "classroom": lambda **_: []}
+    )
+
+    assert results["calendar"]["needs_signin"] is True
+    assert results["calendar"]["ok"] is False
+
+    warning = " ".join(captured["warnings"])
+    assert "sign in again" in warning
+    assert "calendar" in warning
+    assert "python -m src.run_daily" in warning      # tells you the fix
+
+
+def test_an_ordinary_collector_failure_is_also_surfaced(db, monkeypatch):
+    monkeypatch.setattr(run_daily.config, "NOTION_API_KEY", "ntn_fake")
+    monkeypatch.setattr(run_daily.config, "NOTION_PARENT_ID", "page")
+    monkeypatch.setattr(run_daily.notion_writer, "get_client", lambda: object())
+
+    captured = {}
+
+    def fake_write(conn, client, plan, page_id=None, warnings=None):
+        captured["warnings"] = warnings
+        return {"written": 1, "deleted": 0, "already_gone": 0,
+                "page_id": "page", "url": "u", "other_blocks": 0}
+
+    monkeypatch.setattr(run_daily.notion_writer, "write_plan", fake_write)
+
+    def offline(**_):
+        raise ConnectionError("no network")
+
+    run_daily.run_pipeline(db, {"calendar": offline, "classroom": lambda **_: []})
+
+    warning = " ".join(captured["warnings"])
+    assert "could not read calendar" in warning
+    assert "sign in" not in warning            # a different problem, different words
+
+
+def test_a_healthy_run_sends_no_warnings(db, monkeypatch):
+    monkeypatch.setattr(run_daily.config, "NOTION_API_KEY", "ntn_fake")
+    monkeypatch.setattr(run_daily.config, "NOTION_PARENT_ID", "page")
+    monkeypatch.setattr(run_daily.notion_writer, "get_client", lambda: object())
+
+    captured = {}
+
+    def fake_write(conn, client, plan, page_id=None, warnings=None):
+        captured["warnings"] = warnings
+        return {"written": 1, "deleted": 0, "already_gone": 0,
+                "page_id": "page", "url": "u", "other_blocks": 0}
+
+    monkeypatch.setattr(run_daily.notion_writer, "write_plan", fake_write)
+
+    run_daily.run_pipeline(db, {"calendar": lambda **_: [_row("calendar:1")]})
+
+    assert captured["warnings"] == []

@@ -158,11 +158,11 @@ system grows — see CLAUDE.md's non-negotiable constraints.
 
 Recorded here so they are not rediscovered as surprises.
 
-- **Calendar/Classroom duplicate detection has never fired on real data.**
-  It works by decoding the Classroom link Google puts in a mirrored event's
-  description, and it is covered by tests, but every real mirror so far has
-  belonged to an archived course. Treat it as unproven in the wild until a
-  live course produces one.
+- **Calendar/Classroom duplicate detection is now proven on real data.**
+  It decodes the Classroom link Google puts in a mirrored event's
+  description. First real firing: 29 Sep 2026, on a Systems assignment due
+  8 Oct, where the calendar mirror was correctly suppressed in favour of the
+  Classroom row carrying the submission state.
 - **Dedupe arrived in step 1, not step 4.** CLAUDE.md lists dedupe as
   local-model work. What was built is not that: it is an exact ID match
   decoded from a link, with no guessing and no model. The model's dedupe job

@@ -25,10 +25,15 @@ A browser opens. Pick your account, click through the "unverified app"
 warning (**Advanced -> Go to Life-Agent**), allow read-only access. Takes
 about a minute.
 
-**How you will find out:** the Notion page tells you. A scheduled run that
-cannot sign in records the failure rather than hanging, and the page shows
-that sign-in is needed instead of quietly displaying a stale plan. The
-"Google data: N days ago" line on the same page backs that up.
+**How you will find out:** the Notion page tells you, in red, at the top:
+
+    Google needs you to sign in again (calendar). Until you do, this page
+    will not update. Run: python -m src.run_daily
+
+A second red warning appears whenever the data is more than six hours old,
+whatever the cause - a laptop that was simply off for three days produces
+no error at all, just an old page. The "Google data: N days ago" line
+underneath gives the exact age.
 
 **If you ever get a Google Workspace account** (some universities issue
 one), an app marked *Internal* under that organisation has no 7-day limit.

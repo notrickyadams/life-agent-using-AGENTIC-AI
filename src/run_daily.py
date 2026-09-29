@@ -33,6 +33,7 @@ from collections.abc import Callable
 
 from src import config
 from src.collectors import calendar, classroom
+from src.collectors.google_auth import SignInRequired
 from src.db import queries, schema
 from src.notion import writer as notion_writer
 from src.notion.writer import NotionError
@@ -112,7 +113,7 @@ def run_pipeline(
 
     results: dict[str, dict] = {}
     for name, collect in collectors.items():
-        outcome = {"ok": False, "rows": 0, "inactive": 0, "error": None}
+        outcome = {"ok": False, "rows": 0, "inactive": 0, "error": None, "needs_signin": False}
         try:
             # A dry run must not refresh-and-save a token file either.
             rows = collect(allow_browser=allow_browser, save_token=not dry_run)
@@ -133,6 +134,13 @@ def run_pipeline(
             outcome["ok"] = True
             log.info("%s: %d rows%s", name, len(rows),
                      f", {outcome['inactive']} now inactive" if outcome["inactive"] else "")
+        except SignInRequired as exc:
+            # Expected roughly weekly: Google expires the sign-in for an app
+            # in Testing status. Flagged separately so it can be surfaced on
+            # the Notion page, which is where it will actually be noticed.
+            outcome["error"] = str(exc)
+            outcome["needs_signin"] = True
+            log.error("%s needs you to sign in again", name)
         except Exception as exc:  # noqa: BLE001 - isolation is the whole point here
             outcome["error"] = f"{type(exc).__name__}: {exc}"
             log.exception("%s collector failed", name)
@@ -185,8 +193,28 @@ def run_pipeline(
     elif dry_run:
         log.info("notion: dry run, nothing written")
     else:
+        # Anything the page must say about what this run could NOT do.
+        warnings: list[str] = []
+        stages = {n: r for n, r in results.items() if not n.startswith("_")}
+        stuck = [n for n, r in stages.items() if r.get("needs_signin")]
+        if stuck:
+            warnings.append(
+                f"Google needs you to sign in again ({', '.join(stuck)}). "
+                "Until you do, this page will not update. "
+                "Run: python -m src.run_daily"
+            )
+        failed = [n for n, r in stages.items()
+                  if r.get("ok") is False and not r.get("needs_signin")]
+        if failed:
+            warnings.append(
+                f"This run could not read {', '.join(failed)}, so anything from "
+                "there may be out of date. See logs/agent.log."
+            )
+
         try:
-            result = notion_writer.write_plan(conn, notion_writer.get_client(), plan)
+            result = notion_writer.write_plan(
+                conn, notion_writer.get_client(), plan, warnings=warnings
+            )
             notion_outcome["ok"] = True
             notion_outcome["written"] = result["written"]
             results["notion"] = notion_outcome
@@ -268,8 +296,9 @@ def main(argv: list[str] | None = None) -> int:
             return "skipped"      # not attempted is not a failure
         return "OK" if outcome["ok"] else "FAILED"
 
-    summary = ", ".join(f"{name} {_state(r)}" for name, r in results.items())
-    all_ok = all(r.get("ok") is not False for r in results.values())
+    stages = {name: r for name, r in results.items() if not name.startswith("_")}
+    summary = ", ".join(f"{name} {_state(r)}" for name, r in stages.items())
+    all_ok = all(r.get("ok") is not False for r in stages.values())
     log.info("run finished: %s", summary)
     return 0 if all_ok else 1
 

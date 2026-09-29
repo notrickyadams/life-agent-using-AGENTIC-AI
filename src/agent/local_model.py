@@ -2,10 +2,15 @@
 The local model: Ollama, running on this laptop.
 
 This is where routine work goes - tagging, classifying, deciding what kind
-of thing an item is. It is free and nothing sent to it leaves the machine,
-so it can be called once per item without thinking about cost. That is the
-whole reason it exists: it keeps the paid Claude API down to one call a day
-for the step that genuinely needs judgement.
+of thing an item is. It is free, so it can be called once per item without
+thinking about cost. That is the whole reason it exists: it keeps the paid
+Claude API down to one call a day for the step that genuinely needs
+judgement.
+
+With the default OLLAMA_HOST of localhost, nothing sent to it leaves this
+machine. That is a property of the SETTING, not of the code - point
+OLLAMA_HOST at a remote server and your calendar and coursework go there.
+is_local_host() reports which it is, and --check says so plainly.
 
 Talks to Ollama over plain HTTP rather than through a client library. The
 request is four lines and you can see exactly what is sent, which matters
@@ -43,6 +48,19 @@ def _url(path: str) -> str:
     return f"{config.OLLAMA_HOST}{path}"
 
 
+def is_local_host() -> bool:
+    """True when OLLAMA_HOST points at this machine.
+
+    Worth knowing explicitly rather than assuming: the local model is only
+    private because of where it is pointed. A remote host would receive the
+    text of your calendar and coursework.
+    """
+    from urllib.parse import urlparse
+
+    host = (urlparse(config.OLLAMA_HOST).hostname or "").lower()
+    return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "")
+
+
 def is_available(timeout: float = 5.0) -> bool:
     """True when Ollama is running and answering.
 
@@ -72,15 +90,21 @@ def list_models(timeout: float = 10.0) -> list[dict]:
 def has_model(name: str | None = None) -> bool:
     """True when the configured model is installed.
 
-    Ollama reports names with their tag, e.g. 'llama3.1:8b'. A name given
-    without a tag is matched against the part before the colon, since
-    'llama3.1' and 'llama3.1:latest' mean the same thing to a person.
+    Ollama reports names with their tag, e.g. 'llama3.1:8b'. The tag is part
+    of the identity: 'llama3.1:8b' and 'llama3.1:70b' are different models
+    with very different speed and memory needs.
+
+    So a name WITH a tag must match exactly. A name WITHOUT one matches any
+    tag, because 'llama3.1' is a fair way to say "whichever llama3.1 I have".
+    Matching loosely in the first case would report a model as installed and
+    then fail on the first real request with a vaguer error.
     """
     name = name or config.OLLAMA_MODEL
     installed = [m.get("name", "") for m in list_models()]
-    if name in installed:
-        return True
-    return any(m.split(":")[0] == name.split(":")[0] for m in installed)
+
+    if ":" in name:
+        return name in installed
+    return any(m.split(":")[0] == name for m in installed)
 
 
 def generate(
@@ -180,6 +204,7 @@ def check() -> dict:
 
     return {
         "host": config.OLLAMA_HOST,
+        "local": is_local_host(),
         "model": config.OLLAMA_MODEL,
         "installed": names,
         "answer": answer,
@@ -212,7 +237,9 @@ def _main() -> int:
         print("(the first call of the day loads the model and can take a minute)")
         summary = check()
 
-        print(f"\nhost     OK - {summary['host']}")
+        where = ("  (this machine - nothing leaves it)" if summary["local"]
+                 else "  (REMOTE - your calendar and coursework are sent there)")
+        print(f"\nhost     OK - {summary['host']}{where}")
         print(f"model    OK - {summary['model']}")
         print(f"installed  {', '.join(summary['installed'])}")
         print(f"replied    {summary['answer'][:60]!r} in {summary['seconds']}s")
@@ -221,6 +248,8 @@ def _main() -> int:
         elif summary["on_gpu"] is False:
             print("hardware   running on the CPU - it will work, just slower")
         print("\nReady. No paid API was used.")
+        if not summary["local"]:
+            print("NOTE: OLLAMA_HOST is not local, so 'free and private' does not apply.")
         return 0
     except LocalModelError as exc:
         print(f"\nNOT READY:\n{exc}")
