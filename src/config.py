@@ -101,6 +101,19 @@ def notion_configured() -> bool:
     return bool(NOTION_API_KEY and NOTION_PARENT_ID)
 
 
+# --- Local model (Ollama) ---------------------------------------------------
+# Runs on this laptop, free, and nothing sent to it leaves the machine.
+# Used for routine work - tagging, classifying - so the paid Claude API is
+# only needed once a day for the synthesis step.
+OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+
+# Loading the model into the GPU takes about a minute; answering afterwards
+# takes about a second. One generous timeout covers both rather than making
+# the first call of the day look like a failure.
+OLLAMA_TIMEOUT_SECONDS: int = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
+
+
 # --- Local storage ----------------------------------------------------------
 # The single SQLite file that is the source of truth.
 DB_PATH: Path = _path(os.getenv("DB_PATH", "data/agent.db"))
@@ -157,6 +170,8 @@ def describe() -> str:
         "CALENDAR_INCLUDE_CLASSROOM": CALENDAR_INCLUDE_CLASSROOM,
         "CALENDAR_DAYS_BACK": CALENDAR_DAYS_BACK,
         "CALENDAR_DAYS_AHEAD": CALENDAR_DAYS_AHEAD,
+        "OLLAMA_HOST": OLLAMA_HOST,
+        "OLLAMA_MODEL": OLLAMA_MODEL,
         "NOTION_API_KEY": NOTION_API_KEY,
         "NOTION_PARENT_ID": NOTION_PARENT_ID,
         "DB_PATH": DB_PATH,

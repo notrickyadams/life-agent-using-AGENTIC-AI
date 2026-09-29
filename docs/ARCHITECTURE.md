@@ -76,6 +76,46 @@ page/database via the Notion API. No reads from Notion feed back into the
 system in V1 — that's a later-phase feature if I start editing things
 in Notion that the agent should notice.
 
+## Orchestration: what kind of agent this is
+
+V1 is a **pipeline with one routing decision**, not a multi-agent system.
+`run_daily.py` is the orchestrator and it is **plain code, not a model** -
+it calls each stage in a fixed order, isolating failures.
+
+The router in the agent loop is an `if/else` on task type, not a model being
+asked which tool to use. Routing therefore costs nothing and cannot
+surprise you.
+
+**Why not hub-and-spoke** (a central LLM decomposing work to LLM workers):
+it earns its keep when the decomposition cannot be predicted in advance.
+Here it can - "sync, filter by today's rhythm, write to Notion" is the same
+sequence every day. An orchestrator model would add cost (a call per
+decision, breaking the one-paid-call-a-day rule), make failures much harder
+to locate, and introduce non-determinism into questions like "what is due
+Thursday", which have exactly one right answer.
+
+**Where it would earn its place: Phase 3+.** Opportunity discovery has
+genuinely unpredictable decomposition - which sources to search next depends
+on what the last search returned. That is the signal that an orchestrator is
+warranted. Even then the workers should be local or deterministic wherever
+possible, with the expensive model reserved for judgement.
+
+**Three lines not to cross**, in order of cost:
+
+1. The model never decides which API to call. Collectors are dumb by design.
+2. The model never loops until satisfied. Unbounded loops are unbounded spend.
+3. Paid calls happen once, on already-organised data. Enforced in code:
+   `record_claude_call()` refuses a second call in a run, and
+   `runs.claude_calls_made` is counted rather than asserted.
+
+| Pattern | Used in V1 | Where |
+|---|---|---|
+| Pipeline / workflow | yes | every stage |
+| Router | yes | agent loop, as `if/else` |
+| Parallelisation | no | possible in Phase 3 discovery |
+| Hub-and-spoke | no | Phase 3+, if decomposition becomes unpredictable |
+| Autonomous loop | no | not planned - no bounded task needs one |
+
 ## Trust / cost boundary
 
 Everything above the Notion writer runs locally and costs nothing except the

@@ -15,5 +15,9 @@ tzdata==2026.4
 # Notion API client, for writing the daily view (V1 step 3).
 notion-client==3.1.0
 
+# HTTP client, used directly to talk to Ollama (V1 step 4). Already present
+# as a notion-client dependency; pinned here because the code imports it.
+httpx==0.28.1
+
 # --- development only (tests) ---
 pytest==9.1.1
