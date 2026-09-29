@@ -7,48 +7,42 @@ Anything not listed here is already done and committed.
 
 ---
 
-## 1. Publish the Google app  — needed before step 6 (scheduler)
+## 1. Sign in to Google again  — about once a week
 
-**Why.** While the app is in *Testing*, Google expires your sign-in every 7
-days. This has already happened once (Calendar died on 27 Sep, exactly 7
-days after sign-in). Overnight runs are impossible until it is fixed.
+**This is a recurring chore, not a one-off.** Google expires the sign-in
+every 7 days for an app in *Testing* status, and publishing to production
+is not available here: it needs a verified domain, which this project does
+not have and does not warrant buying. Decided on 29 Sep - the alternative
+was a domain purchase and a verification review for a personal tool.
 
-1. Open <https://console.cloud.google.com>
-2. Select the **Life-Agent** project in the dropdown at the top
-3. Left menu: **APIs & Services → OAuth consent screen**
-   (newer consoles: **Google Auth Platform → Audience**)
-4. Find **Publishing status: Testing**
-5. Click **PUBLISH APP**, then **CONFIRM**
-6. Status should read **In production**
+Observed behaviour: signed in 20 Sep, expired 27 Sep. Exactly 7 days.
 
-If it offers a verification form, close it. Verification is only for
-distributing the app to other people; publishing works without it. You will
-still see an "unverified app" warning when signing in - click
-**Advanced → Go to Life-Agent**. That is expected for a personal app.
+**When it happens, run:**
+
+    python -m src.run_daily
+
+A browser opens. Pick your account, click through the "unverified app"
+warning (**Advanced -> Go to Life-Agent**), allow read-only access. Takes
+about a minute.
+
+**How you will find out:** the Notion page tells you. A scheduled run that
+cannot sign in records the failure rather than hanging, and the page shows
+that sign-in is needed instead of quietly displaying a stale plan. The
+"Google data: N days ago" line on the same page backs that up.
+
+**If you ever get a Google Workspace account** (some universities issue
+one), an app marked *Internal* under that organisation has no 7-day limit.
+Not required - just the one thing that would remove this chore.
 
 **Check it worked:**
 
     python -m src.run_daily --dry-run
 
-Should complete without opening a browser.
+Completes without opening a browser.
 
 ---
 
-## 2. Re-sign in to Google Calendar  — after step 1
-
-The expired token has to be replaced once.
-
-    python -m src.collectors.calendar --list-calendars
-
-A browser opens. Pick your account, click through the unverified warning,
-allow read-only calendar access. It saves a token and will not ask again.
-
-**Check it worked:** the command prints your calendars, including the
-`classroom...` ones.
-
----
-
-## 3. Install Ollama  — needed for step 4
+## 2. Install Ollama  — needed for step 4
 
 **Why.** Step 4 runs a small model locally for routine work (tagging,
 classifying), so the paid Claude API is only used once a day for the
@@ -78,7 +72,7 @@ Should show `llama3.1:8b`.
 
 ---
 
-## 4. Anthropic API key  — needed for step 5, NOT before
+## 3. Anthropic API key  — needed for step 5, NOT before
 
 Do this when step 5 starts, so you are not paying for an unused key.
 
@@ -94,7 +88,7 @@ data, so expect cents per month. The code refuses a second call per run.
 
 ---
 
-## 5. Fill in your weekly rhythm  — optional, any time
+## 4. Fill in your weekly rhythm  — optional, any time
 
 Open `rhythm.toml`. Monday and Tuesday have themes taken from your own
 notes; the rest are deliberately blank.
