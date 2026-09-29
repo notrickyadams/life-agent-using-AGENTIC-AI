@@ -200,7 +200,7 @@ def run_pipeline(
         if stuck:
             warnings.append(
                 f"Google needs you to sign in again ({', '.join(stuck)}). "
-                "Until you do, this page will not update. "
+                "Until you do, everything below stays as it was at the time shown. "
                 "Run: python -m src.run_daily"
             )
         failed = [n for n, r in stages.items()

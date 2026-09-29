@@ -745,3 +745,75 @@ def test_later_items_carry_their_date(db):
               submission_state="CREATED")
 
     assert "Thu 08 Oct" in format_plan(build_plan(db, make_rhythm(), TODAY))
+
+
+# --- undated work (regression: it was invisible) ----------------------------
+
+def test_undated_work_you_owe_is_still_shown(db):
+    """Classroom allows an assignment with no due date. It is still work you
+    owe, so hiding it is the same falsely-empty-page bug `later` exists to
+    prevent - in a form that survived the first fix."""
+    add_event(db, "classroom:c/nodate", title="Project proposal", submission_state="CREATED")
+
+    plan = build_plan(db, make_rhythm(), TODAY)
+
+    assert [i.title for i in plan.later] == ["Project proposal"]
+    assert plan.is_empty is False
+
+
+def test_undated_finished_work_stays_hidden(db):
+    add_event(db, "classroom:c/done", title="Done", submission_state="TURNED_IN")
+
+    assert build_plan(db, make_rhythm(), TODAY).is_empty is True
+
+
+def test_an_undated_themed_item_goes_to_the_theme_section(db):
+    add_event(db, "classroom:c/x", title="Final Exam", submission_state="CREATED")
+
+    plan = build_plan(db, make_rhythm(), TODAY)
+
+    assert [i.title for i in plan.themed] == ["Final Exam"]
+    assert plan.later == []
+
+
+def test_undated_work_sorts_after_dated_work(db):
+    add_event(db, "classroom:c/nodate", title="No date", submission_state="CREATED")
+    add_event(db, "classroom:c/dated", title="Has a date", due_at="2026-11-30T20:59:00Z",
+              submission_state="CREATED")
+
+    titles = [i.title for i in build_plan(db, make_rhythm(), TODAY).later]
+
+    assert titles == ["Has a date", "No date"]
+
+
+def test_an_undated_calendar_event_is_not_treated_as_owed(db):
+    """Only Classroom work is owed; an event with no date is just noise."""
+    add_event(db, "calendar:odd", title="Something odd")
+
+    assert build_plan(db, make_rhythm(), TODAY).is_empty is True
+
+
+# --- the sync timestamp -----------------------------------------------------
+
+def test_the_plan_records_when_google_was_last_read(db):
+    from datetime import datetime
+
+    _mark_synced(db, "calendar", "classroom")
+
+    plan = build_plan(db, make_rhythm(), TODAY)
+
+    assert isinstance(plan.synced_at, datetime)
+    assert str(plan.synced_at.tzinfo) == CAIRO       # shown in your timezone
+
+
+def test_the_sync_time_is_the_older_of_the_two_sources(db):
+    _mark_synced(db, "calendar", "classroom", at="2026-09-01T00:00:00Z")
+    _mark_synced(db, "calendar")
+
+    plan = build_plan(db, make_rhythm(), TODAY)
+
+    assert plan.synced_at.date() == date(2026, 9, 1)
+
+
+def test_never_synced_leaves_the_timestamp_empty(db):
+    assert build_plan(db, make_rhythm(), TODAY).synced_at is None

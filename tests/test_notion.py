@@ -762,3 +762,192 @@ def test_later_comes_after_the_urgent_sections(db):
 
     assert texts[headings[0]].startswith("Today")
     assert texts[headings[1]].startswith("Later")
+
+
+# --- the page shows a timestamp, not a frozen relative age ------------------
+
+def test_the_page_shows_when_google_was_read_not_how_long_ago(db):
+    """A relative age is only true at the instant of writing. If the laptop
+    is off for a week, no run happens to correct it and the page goes on
+    claiming the data is fresh. A timestamp cannot go stale."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    plan = build_plan(db, _rhythm(), MONDAY)
+    plan.synced_at = datetime(2026, 9, 29, 18, 13, tzinfo=ZoneInfo("Africa/Cairo"))
+    plan.data_age_seconds = 30
+
+    texts = _texts(writer.render_plan(plan))
+
+    assert any("Tue 29 Sep 18:13" in t for t in texts)
+    assert not any("just now" in t for t in texts)
+
+
+def test_a_never_synced_page_says_so_in_a_readable_sentence(db):
+    """Regression: this read 'Google was last read never synced'."""
+    plan = build_plan(db, _rhythm(), MONDAY)
+    plan.synced_at = None
+    plan.data_age_seconds = None
+
+    texts = _texts(writer.render_plan(plan))
+
+    assert any("never been read" in t for t in texts)
+    assert not any("last read never" in t for t in texts)
+    assert any("never read" in t for t in texts)          # the stamp line
+
+
+def test_the_marker_says_your_notes_are_kept(db):
+    """It used to claim anything typed on the page would be replaced."""
+    blocks = writer.render_plan(build_plan(db, _rhythm(), MONDAY))
+    marker = next(b for b in blocks if writer.is_agent_marker(b))
+
+    text = _text_of(marker)
+    assert "stays" in text
+    assert "replaced on the next run" not in text
+
+
+# --- deleting safely --------------------------------------------------------
+
+class DeletableNotion(WritableNotion):
+    """WritableNotion that also answers blocks.retrieve, for has_children."""
+
+    def __init__(self, blocks=None, children_of=None, retrieve_error=None, **kwargs):
+        super().__init__(blocks=blocks, **kwargs)
+        self._children_of = set(children_of or ())
+        self._retrieve_error = retrieve_error
+        outer = self
+        inner = self.blocks
+
+        class _Blocks:
+            children = inner.children
+
+            def delete(self, block_id):
+                return inner.delete(block_id)
+
+            def retrieve(self, block_id):
+                if outer._retrieve_error:
+                    raise outer._retrieve_error
+                return {"id": block_id, "has_children": block_id in outer._children_of}
+
+        self.blocks = _Blocks()
+
+
+def test_a_block_with_your_note_nested_under_it_is_not_deleted(db):
+    """Deleting a Notion block deletes everything under it. A note you
+    indented beneath one of the agent's bullets must survive."""
+    client = DeletableNotion(blocks=[])
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    first = queries.get_notion_blocks(db, PAGE)
+
+    # You indent a note under the agent's second block.
+    client._children_of = {first[1]}
+
+    result = writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert result["kept"] == 1
+    assert first[1] not in client.deleted
+    # Still on the agent's list, so it is retried once the note moves.
+    assert first[1] in queries.get_notion_blocks(db, PAGE)
+
+
+def test_a_kept_block_is_deleted_once_its_children_are_gone(db):
+    client = DeletableNotion(blocks=[])
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    first = queries.get_notion_blocks(db, PAGE)
+    client._children_of = {first[1]}
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    client._children_of = set()          # you moved the note elsewhere
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert first[1] in client.deleted
+
+
+def test_an_unreadable_block_is_still_tidied_up(db):
+    """On doubt, delete - otherwise unreadable blocks accumulate forever."""
+    client = DeletableNotion(blocks=[], retrieve_error=_api_error("internal_server_error"))
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    first = queries.get_notion_blocks(db, PAGE)
+
+    result = writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert result["kept"] == 0
+    assert sorted(client.deleted) == sorted(first)
+
+
+def test_only_a_missing_block_counts_as_already_deleted(db):
+    """Any other error must surface, not be filed as 'already gone' -
+    that would leave an old copy on the page with no warning."""
+    client = DeletableNotion(blocks=[])
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    first = queries.get_notion_blocks(db, PAGE)
+
+    client._delete_errors = {first[0]: _api_error("validation_error")}
+
+    with pytest.raises(Exception):
+        writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+
+def test_a_block_deleted_by_hand_is_still_not_an_error(db):
+    client = DeletableNotion(blocks=[])
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    first = queries.get_notion_blocks(db, PAGE)
+    client._delete_errors = {first[0]: _api_error("object_not_found")}
+
+    result = writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert result["already_gone"] == 1
+
+
+# --- a write that fails partway ---------------------------------------------
+
+class HalfFailingNotion(WritableNotion):
+    """Fails on the Nth append batch, after earlier ones succeeded."""
+
+    def __init__(self, fail_on_batch=2):
+        super().__init__(blocks=[])
+        outer = self
+        outer._batch = 0
+        inner_append = self.blocks.children.append
+
+        class _Children:
+            def list(self, block_id, start_cursor=None):
+                return {"results": outer.page_blocks, "has_more": False, "next_cursor": None}
+
+            def append(self, block_id, children):
+                outer._batch += 1
+                if outer._batch >= fail_on_batch:
+                    raise _api_error("internal_server_error")
+                return inner_append(block_id, children)
+
+        class _Blocks:
+            children = _Children()
+
+            def delete(self, block_id):
+                outer.deleted.append(block_id)
+                outer.page_blocks = [b for b in outer.page_blocks if b.get("id") != block_id]
+                return {}
+
+            def retrieve(self, block_id):
+                return {"id": block_id, "has_children": False}
+
+        self.blocks = _Blocks()
+
+
+def test_blocks_written_before_a_failure_are_still_recorded(db):
+    """Otherwise they are orphans: on the page, absent from the agent's
+    record, so never cleaned up and never recognised as its own."""
+    for i in range(150):                      # enough for two append batches
+        _add(db, f"calendar:e{i}", title=f"Event {i}",
+             due_at=f"2026-09-21T{6 + i % 12:02d}:00:00Z")
+
+    client = HalfFailingNotion(fail_on_batch=2)
+
+    with pytest.raises(Exception):
+        writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    recorded = queries.get_notion_blocks(db, PAGE)
+    on_page = [b["id"] for b in client.page_blocks]
+
+    assert recorded, "nothing was recorded, so the first batch is orphaned"
+    assert sorted(recorded) == sorted(on_page)

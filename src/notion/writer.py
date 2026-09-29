@@ -36,7 +36,10 @@ log = logging.getLogger(__name__)
 
 # The first block of a page the agent owns. Anything else at the top means
 # the page holds someone else's content and must not be overwritten.
-MARKER_TEXT = "Written automatically by your agent. Anything typed here is replaced on the next run."
+MARKER_TEXT = (
+    "Written automatically by your agent. It replaces only the blocks it wrote itself, "
+    "so anything you add to this page stays."
+)
 
 
 class NotionError(Exception):
@@ -271,11 +274,11 @@ def _block(kind: str, *rich: dict, **extra) -> dict:
 
 
 def marker_block() -> dict:
-    """The callout that identifies this page as the agent's.
+    """The callout that says what this page is.
 
-    check_page() looks for exactly this as the first block, and it tells you
-    in plain words that the page is replaced - so nothing typed here is lost
-    without warning.
+    A label, not the safety mechanism - see check_page. Its text describes
+    what actually happens: the agent replaces only the blocks it wrote
+    itself, so anything you add to the page stays.
     """
     return _block(
         "callout",
@@ -305,6 +308,20 @@ def warning_block(text: str) -> dict:
     )
 
 
+def stamp_text(plan) -> str:
+    """When Google was last read, as a fixed local time.
+
+    Deliberately absolute. The page is written once and then sits there, so
+    a relative age like "just now" is only true at the instant of writing -
+    and if the laptop is off for a week, no run happens to correct it. The
+    page would go on claiming the data is fresh forever. A timestamp cannot
+    go stale, because the reader compares it with their own clock.
+    """
+    if plan.synced_at is None:
+        return "never read"
+    return plan.synced_at.strftime("%a %d %b %H:%M")
+
+
 def render_plan(plan, warnings: list[str] | None = None) -> list[dict]:
     """Turn a DayPlan into the blocks that make up the page.
 
@@ -328,10 +345,10 @@ def render_plan(plan, warnings: list[str] | None = None) -> list[dict]:
     # just an old page.
     age_seconds = plan.data_age_seconds
     if age_seconds is None or age_seconds > STALE_AFTER_SECONDS:
-        blocks.append(warning_block(
-            f"This is not today's data - Google was last read {describe_age(age_seconds)}. "
-            "Run: python -m src.run_daily"
-        ))
+        when = "Google has never been read" if plan.synced_at is None else (
+            f"Google was last read {describe_age(age_seconds)}"
+        )
+        blocks.append(warning_block(f"This is not today's data - {when}. Run: python -m src.run_daily"))
 
     blocks.append(marker_block())
 
@@ -340,9 +357,11 @@ def render_plan(plan, warnings: list[str] | None = None) -> list[dict]:
         heading += f"  -  {plan.day.theme}"
     blocks.append(_block("heading_1", rich_text(heading)))
 
-    # Always state how current the underlying Google data is, so the page
-    # never silently implies "just now".
-    blocks.append(_block("paragraph", rich_text(f"Google data: {describe_age(age_seconds)}")))
+    # A TIMESTAMP, not "just now". The page is written once and then sits
+    # there: if the laptop is off for three days, a relative age freezes and
+    # keeps claiming the data is fresh, with no run happening to correct it.
+    # An absolute time stays true no matter how long the page goes unwritten.
+    blocks.append(_block("paragraph", rich_text(f"Google data: {stamp_text(plan)}")))
 
     if plan.day.focus:
         blocks.append(_block("quote", rich_text(plan.day.focus)))
@@ -377,38 +396,78 @@ def chunked(blocks: list[dict], size: int = MAX_CHILDREN_PER_APPEND) -> list[lis
 
 # --- writing ----------------------------------------------------------------
 
-def append_blocks(client, page_id: str, blocks: list[dict]) -> list[str]:
+def append_blocks(client, page_id: str, blocks: list[dict], on_created=None) -> list[str]:
     """Append blocks to the page and return the ids Notion assigned them.
 
     Sent in batches of 100, which is Notion's documented per-request limit.
+
+    `on_created` is called with each batch's ids as soon as they exist. That
+    matters when a later batch fails: without it the blocks already written
+    would be orphans - on the page, but absent from the agent's record, so
+    never cleaned up and never recognised as its own.
     """
     created: list[str] = []
     for batch in chunked(blocks):
         response = client.blocks.children.append(block_id=page_id, children=batch)
-        created.extend(item["id"] for item in response.get("results", []))
+        ids = [item["id"] for item in response.get("results", [])]
+        created.extend(ids)
+        if on_created and ids:
+            on_created(ids)
     return created
 
 
-def delete_blocks(client, block_ids: list[str]) -> tuple[list[str], list[str]]:
-    """Delete these blocks. Returns (deleted, already_gone).
+def delete_blocks(client, block_ids: list[str], keep_with_children: bool = True
+                  ) -> tuple[list[str], list[str], list[str]]:
+    """Delete these blocks. Returns (deleted, already_gone, kept).
 
-    A block you deleted by hand in Notion is not an error - it is simply
-    gone, which is the outcome we wanted. Anything else is re-raised.
+    Deleting a Notion block deletes everything nested under it. If you have
+    indented a note beneath one of the agent's bullets, that note is a child
+    of a block the agent owns - and deleting the bullet would take your note
+    with it. So a block that has grown children is LEFT IN PLACE and
+    reported as kept. A stale bullet on the page is a much smaller problem
+    than a deleted note.
+
+    A block you deleted by hand is not an error - it is already gone, which
+    is the outcome wanted. Only that specific case is treated as success;
+    every other error is re-raised, because quietly calling a real failure
+    "already deleted" would leave an old copy on the page with no warning.
     """
     from notion_client.errors import APIResponseError
 
     deleted: list[str] = []
     already_gone: list[str] = []
+    kept: list[str] = []
+
     for block_id in block_ids:
+        if keep_with_children and _has_children(client, block_id):
+            kept.append(block_id)
+            log.info("keeping block %s - something is nested under it", block_id)
+            continue
         try:
             client.blocks.delete(block_id=block_id)
             deleted.append(block_id)
         except APIResponseError as exc:
-            if exc.code in ("object_not_found", "validation_error"):
+            if exc.code == "object_not_found":
                 already_gone.append(block_id)
             else:
                 raise
-    return deleted, already_gone
+    return deleted, already_gone, kept
+
+
+def _has_children(client, block_id: str) -> bool:
+    """True when something is nested under this block.
+
+    On any doubt this answers False, so an unreadable block is still tidied
+    up rather than accumulating forever. The case it protects against - a
+    note you indented under one of the agent's bullets - is rare, and its
+    children are readable when it happens.
+    """
+    from notion_client.errors import APIResponseError
+
+    try:
+        return bool(client.blocks.retrieve(block_id=block_id).get("has_children"))
+    except (APIResponseError, AttributeError, KeyError):
+        return False
 
 
 def write_plan(conn, client, plan, page_id: str | None = None,
@@ -438,21 +497,32 @@ def write_plan(conn, client, plan, page_id: str | None = None,
     summary = check_page(client, page_id, known_block_ids=previous)
 
     blocks = render_plan(plan, warnings)
-    created = append_blocks(client, page_id, blocks)
-    queries.record_notion_blocks(conn, page_id, created)
 
-    deleted, already_gone = delete_blocks(client, previous)
-    queries.forget_notion_blocks(conn, previous)
+    # Recorded batch by batch as Notion confirms each one. If a later batch
+    # fails, the blocks already written are still on the agent's list, so
+    # the next run removes them instead of leaving a duplicate copy nobody
+    # owns.
+    created = append_blocks(
+        client, page_id, blocks,
+        on_created=lambda ids: queries.record_notion_blocks(conn, page_id, ids),
+    )
+
+    deleted, already_gone, kept = delete_blocks(client, previous)
+    # Anything kept stays on the agent's list, so it is tried again next run
+    # once whatever was nested under it has gone.
+    queries.forget_notion_blocks(conn, deleted + already_gone)
 
     log.info(
-        "notion: wrote %d blocks, removed %d previous%s",
+        "notion: wrote %d blocks, removed %d previous%s%s",
         len(created), len(deleted),
         f" ({len(already_gone)} already gone)" if already_gone else "",
+        f", kept {len(kept)} with notes nested under them" if kept else "",
     )
     return {
         "written": len(created),
         "deleted": len(deleted),
         "already_gone": len(already_gone),
+        "kept": len(kept),
         "page_id": page_id,
         "url": summary["url"],
         "other_blocks": summary["other_blocks"],

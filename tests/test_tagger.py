@@ -166,9 +166,12 @@ def test_classify_items_skips_the_ones_with_no_tag(monkeypatch):
     items = [make_item("classroom:c/1", title="1"),
              make_item("classroom:c/2", title="2"),
              make_item("classroom:c/3", title="3")]
-    result = tagger.classify_items(items)
+    tags, asked = tagger.classify_items(items)
 
-    assert result == {"classroom:c/1": "lab", "classroom:c/3": "exam"}
+    assert tags == {"classroom:c/1": "lab", "classroom:c/3": "exam"}
+    # All three WERE asked - the middle one simply gave an unusable answer.
+    # That distinction is what stops an outage wiping everything.
+    assert asked == {"classroom:c/1", "classroom:c/2", "classroom:c/3"}
 
 
 # --- storage ----------------------------------------------------------------
@@ -183,7 +186,7 @@ def _add_event(db, event_id):
 def test_tags_are_stored_under_the_model_source(db):
     _add_event(db, "classroom:c/1")
 
-    tagger.store_tags(db, {"classroom:c/1": "lab"})
+    tagger.store_tags(db, {"classroom:c/1": "lab"}, {"classroom:c/1"})
 
     assert queries.get_tags(db, "classroom:c/1", source=MODEL_TAG_SOURCE) == ["lab"]
 
@@ -193,7 +196,7 @@ def test_model_tags_do_not_disturb_rule_tags(db):
     _add_event(db, "classroom:c/1")
     queries.set_tags(db, "classroom:c/1", ["exam"], "rule")
 
-    tagger.store_tags(db, {"classroom:c/1": "lab"})
+    tagger.store_tags(db, {"classroom:c/1": "lab"}, {"classroom:c/1"})
 
     assert queries.get_tags(db, "classroom:c/1") == ["exam", "lab"]
     assert queries.get_tags(db, "classroom:c/1", source="rule") == ["exam"]
@@ -201,18 +204,91 @@ def test_model_tags_do_not_disturb_rule_tags(db):
 
 def test_a_tag_that_no_longer_applies_is_removed(db):
     _add_event(db, "classroom:c/1")
-    tagger.store_tags(db, {"classroom:c/1": "lab"})
+    tagger.store_tags(db, {"classroom:c/1": "lab"}, {"classroom:c/1"})
 
     # The next run classifies it differently.
-    tagger.store_tags(db, {"classroom:c/1": "exam"})
+    tagger.store_tags(db, {"classroom:c/1": "exam"}, {"classroom:c/1"})
 
     assert queries.get_tags(db, "classroom:c/1", source=MODEL_TAG_SOURCE) == ["exam"]
 
 
-def test_storing_nothing_clears_previous_model_tags(db):
+def test_an_item_asked_about_and_given_no_tag_loses_its_old_one(db):
+    """That answer is current, so the old tag is out of date."""
     _add_event(db, "classroom:c/1")
-    tagger.store_tags(db, {"classroom:c/1": "lab"})
+    tagger.store_tags(db, {"classroom:c/1": "lab"}, {"classroom:c/1"})
 
-    tagger.store_tags(db, {})
+    tagger.store_tags(db, {}, {"classroom:c/1"})      # asked, no tag
 
     assert queries.get_tags(db, "classroom:c/1", source=MODEL_TAG_SOURCE) == []
+
+
+def test_an_item_that_could_not_be_asked_keeps_its_tag(db):
+    """The fix for an Ollama outage wiping every tag."""
+    _add_event(db, "classroom:c/1")
+    tagger.store_tags(db, {"classroom:c/1": "lab"}, {"classroom:c/1"})
+
+    tagger.store_tags(db, {}, set())                  # nothing was asked
+
+    assert queries.get_tags(db, "classroom:c/1", source=MODEL_TAG_SOURCE) == ["lab"]
+
+
+def test_an_outage_leaves_every_tag_intact(db, monkeypatch):
+    """End to end: the model is down, so nothing is asked, so nothing changes."""
+    _add_event(db, "classroom:c/1")
+    _add_event(db, "classroom:c/2")
+    tagger.store_tags(db, {"classroom:c/1": "lab", "classroom:c/2": "exam"},
+                      {"classroom:c/1", "classroom:c/2"})
+
+    def down(*a, **k):
+        raise tagger.local_model.LocalModelError("ollama is not running")
+
+    monkeypatch.setattr(tagger.local_model, "generate", down)
+
+    tags, asked = tagger.classify_items([make_item("classroom:c/1"), make_item("classroom:c/2")])
+    tagger.store_tags(db, tags, asked)
+
+    assert (tags, asked) == ({}, set())
+    assert queries.get_tags(db, "classroom:c/1", source=MODEL_TAG_SOURCE) == ["lab"]
+    assert queries.get_tags(db, "classroom:c/2", source=MODEL_TAG_SOURCE) == ["exam"]
+
+
+def test_a_partial_outage_only_touches_what_was_asked(db, monkeypatch):
+    _add_event(db, "classroom:c/1")
+    _add_event(db, "classroom:c/2")
+    tagger.store_tags(db, {"classroom:c/1": "lab", "classroom:c/2": "exam"},
+                      {"classroom:c/1", "classroom:c/2"})
+
+    def flaky(prompt, **k):
+        if "classroom:c/2" in prompt or "two" in prompt:
+            raise tagger.local_model.LocalModelError("timed out")
+        return "quiz"
+
+    monkeypatch.setattr(tagger.local_model, "generate", flaky)
+
+    items = [make_item("classroom:c/1", title="classroom:c/1"),
+             make_item("classroom:c/2", title="classroom:c/2")]
+    tags, asked = tagger.classify_items(items)
+    tagger.store_tags(db, tags, asked)
+
+    assert queries.get_tags(db, "classroom:c/1", source=MODEL_TAG_SOURCE) == ["quiz"]
+    assert queries.get_tags(db, "classroom:c/2", source=MODEL_TAG_SOURCE) == ["exam"]
+
+
+# --- negated answers --------------------------------------------------------
+
+@pytest.mark.parametrize("answer", [
+    "not a lab",
+    "No exam",
+    "none - not quiz",
+    "isn't a project",
+    "never a reading",
+])
+def test_a_negated_answer_yields_no_tag(answer):
+    """'not a lab' names a tag and means the opposite. Reading the tag out
+    of it would be exactly wrong - worse than answering nothing."""
+    assert parse_tag(answer) is None
+
+
+def test_a_plain_answer_still_works_after_the_negation_guard():
+    assert parse_tag("lab") == "lab"
+    assert parse_tag("Answer: quiz") == "quiz"

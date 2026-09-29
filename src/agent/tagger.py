@@ -59,6 +59,11 @@ MAX_ANSWER_CHARS = 200
 # explaining itself or echoing the question back. See parse_tag.
 MAX_ANSWER_WORDS = 4
 
+# A reply that negates is not a classification. "not a lab" names a tag and
+# means the opposite, so reading the tag out of it would be exactly wrong -
+# worse than giving no answer at all.
+_NEGATIONS = re.compile(r"\b(not|no|isn't|aren't|never|neither|nor)\b")
+
 SYSTEM_PROMPT = (
     "You label university coursework. You answer with exactly one word from "
     "the list you are given, and nothing else. No explanation, no punctuation, "
@@ -122,7 +127,7 @@ def parse_tag(answer: str) -> str | None:
     #    happens to contain a tag word. Reading a tag out of an echo would
     #    label items by their own titles - precisely the thing the model was
     #    brought in to get past.
-    if len(text.split()) <= MAX_ANSWER_WORDS:
+    if len(text.split()) <= MAX_ANSWER_WORDS and not _NEGATIONS.search(text):
         found = {tag for tag in ALLOWED_TAGS if re.search(rf"\b{re.escape(tag)}\b", text)}
         if len(found) == 1:
             return found.pop()
@@ -156,33 +161,69 @@ def classify(item) -> str | None:
     return tag
 
 
-def classify_items(items: list) -> dict[str, str]:
-    """Classify many items. Returns {item_id: tag} for those that got one.
+def classify_items(items: list) -> tuple[dict[str, str], set[str]]:
+    """Classify many items.
 
-    Runs one at a time. That is fine because the model is local and free:
+    Returns (tags_by_id, asked_ids), where asked_ids are the items the model
+    actually answered for - with or without a tag.
+
+    That second value is the whole point. "The model is down" and "this item
+    has no tag" are different facts, and collapsing them lets an Ollama
+    outage silently erase every tag: nothing classified, so nothing stored,
+    so everything cleared. An item the model could not be asked about keeps
+    whatever it already had.
+
+    Runs one at a time, which is fine because the model is local and free:
     the first call of a run loads it (about a minute) and each one after
     takes about a second.
     """
-    results: dict[str, str] = {}
+    tags: dict[str, str] = {}
+    asked: set[str] = set()
+
     for item in items:
-        tag = classify(item)
+        try:
+            answer = local_model.generate(
+                build_prompt(item),
+                system=SYSTEM_PROMPT,
+                temperature=0.0,
+                max_tokens=8,
+            )
+        except local_model.LocalModelError as exc:
+            log.warning("could not classify %s: %s", item.id, exc)
+            continue          # NOT asked - whatever tag it has stands
+
+        asked.add(item.id)
+        tag = parse_tag(answer)
         if tag:
-            results[item.id] = tag
-    return results
+            tags[item.id] = tag
+
+    return tags, asked
 
 
-def store_tags(conn, tags_by_id: dict[str, str]) -> int:
-    """Write the model's tags, replacing only this source's previous ones.
+def store_tags(conn, tags_by_id: dict[str, str], asked_ids: set[str] | None = None) -> int:
+    """Write the model's tags, touching only the items it was asked about.
 
-    Cleared and rebuilt wholesale, like the rule tags: a tag is a function of
-    the item and the current model, so a stale one from a previous run should
-    not linger. Only MODEL_TAG_SOURCE is touched.
+    `asked_ids` is what makes an outage safe. Tags are rewritten only for
+    items the model actually answered for, so an item it could not be asked
+    about keeps what it had. Clearing everything and rebuilding would mean a
+    single Ollama outage wipes every tag you have.
+
+    Within that set the rewrite is still complete: an item that WAS asked
+    and got no tag has its old one removed, because that answer is current.
+
+    Only MODEL_TAG_SOURCE is touched - the deterministic 'rule' tags and
+    anything set by hand are left alone.
     """
     from src.db import queries
 
-    queries.clear_tags_by_source(conn, MODEL_TAG_SOURCE)
+    if asked_ids is None:
+        # Nothing said about what was asked, so assume exactly the items
+        # that got a tag. The conservative reading: never clear on a guess.
+        asked_ids = set(tags_by_id)
+
     written = 0
-    for item_id, tag in tags_by_id.items():
-        written += queries.set_tags(conn, item_id, [tag], MODEL_TAG_SOURCE)
+    for item_id in asked_ids:
+        tag = tags_by_id.get(item_id)
+        written += queries.set_tags(conn, item_id, [tag] if tag else [], MODEL_TAG_SOURCE)
     conn.commit()
     return written

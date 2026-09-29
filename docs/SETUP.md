@@ -30,10 +30,18 @@ about a minute.
     Google needs you to sign in again (calendar). Until you do, this page
     will not update. Run: python -m src.run_daily
 
-A second red warning appears whenever the data is more than six hours old,
-whatever the cause - a laptop that was simply off for three days produces
-no error at all, just an old page. The "Google data: N days ago" line
-underneath gives the exact age.
+A second red warning appears whenever the data is more than six hours old
+at the moment a run happens.
+
+Note what that cannot cover: if the laptop is OFF, no run happens, so no
+warning can be written. The page keeps whatever it last said. That is why
+the page prints an actual timestamp -
+
+    Google data: Tue 29 Sep 18:13
+
+- rather than "just now". A relative age is only true at the instant of
+writing and would freeze into a lie; a timestamp you compare against your
+own clock cannot.
 
 **If you ever get a Google Workspace account** (some universities issue
 one), an app marked *Internal* under that organisation has no 7-day limit.

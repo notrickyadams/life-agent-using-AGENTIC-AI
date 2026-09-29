@@ -172,6 +172,11 @@ class DayPlan:
     # can say how current it is, instead of quietly implying "just now".
     data_age_seconds: float | None = None
 
+    # When Google was last read, in local time. The Notion page shows this
+    # rather than an age, because the page is written once and then sits
+    # there - a relative age freezes and goes on claiming the data is fresh.
+    synced_at: datetime | None = None
+
     @property
     def is_empty(self) -> bool:
         """True when there is genuinely nothing to show - not merely nothing urgent."""
@@ -353,6 +358,11 @@ def _sort_key(item: Item) -> tuple:
     )
 
 
+def _has_no_date(item: Item) -> bool:
+    """True for work with no due date at all."""
+    return item.local_date is None
+
+
 def build_plan(conn, rhythm: Rhythm, on: date | None = None) -> DayPlan:
     """Build the plan for one day. Pass `on` to plan for a date other than today.
 
@@ -364,7 +374,21 @@ def build_plan(conn, rhythm: Rhythm, on: date | None = None) -> DayPlan:
     day = rhythm.day_for(on)
     horizon = on + timedelta(days=rhythm.due_soon_days)
 
-    plan = DayPlan(on=on, day=day, data_age_seconds=queries.data_age_seconds(conn))
+    synced_at = None
+    stamps = [queries.last_successful_sync(conn, s) for s in ("calendar", "classroom")]
+    stamps = [s for s in stamps if s]
+    if stamps:
+        # The OLDER of the two, so a fresh calendar never hides a stale
+        # classroom. Shown in your timezone, since you read it, not UTC.
+        oldest = datetime.fromisoformat(min(stamps).replace("Z", "+00:00"))
+        synced_at = oldest.astimezone(rhythm.zone)
+
+    plan = DayPlan(
+        on=on,
+        day=day,
+        data_age_seconds=queries.data_age_seconds(conn),
+        synced_at=synced_at,
+    )
 
     now_local = rhythm.local_now()
     planning_today = on == now_local.date()
@@ -375,9 +399,16 @@ def build_plan(conn, rhythm: Rhythm, on: date | None = None) -> DayPlan:
         when = item.local_date
 
         if when is None:
-            # No date at all. Only surfaced if it matches today's theme.
-            if item.matched_keywords and item.needs_action:
-                plan.themed.append(item)
+            # No date at all - Classroom allows an assignment with no due
+            # date. It is still work you owe, so it still has to appear:
+            # under the theme if it fits one, otherwise under `later`.
+            # Dropping it was the same "falsely empty page" bug `later`
+            # exists to prevent, in a form that survived the first fix.
+            if item.needs_action:
+                if item.matched_keywords:
+                    plan.themed.append(item)
+                else:
+                    plan.later.append(item)
             continue
 
         # Only something still running is "ongoing". A past deadline started
