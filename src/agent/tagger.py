@@ -200,6 +200,39 @@ def classify_items(items: list) -> tuple[dict[str, str], set[str]]:
     return tags, asked
 
 
+def tag_plan(conn, plan, store: bool = True) -> dict:
+    """Classify everything in the plan and attach the tags to it.
+
+    Only items the plan is going to SHOW are classified - that keeps the
+    work bounded by what you will actually read, rather than by everything
+    ever synced.
+
+    Returns a summary. Never raises: the tags are a nicety, and a day plan
+    without them is still a day plan. If Ollama is not running the stage
+    reports that and changes nothing.
+    """
+    items = plan.all_items()
+    if not items:
+        return {"ok": True, "tagged": 0, "asked": 0, "skipped": "nothing to tag"}
+
+    if not local_model.is_available():
+        return {"ok": False, "tagged": 0, "asked": 0,
+                "skipped": "Ollama is not running - start it, or see docs/SETUP.md"}
+
+    tags, asked = classify_items(items)
+
+    # Attach to the plan so the Notion page and the terminal both show them
+    # without going back to the database.
+    for item in items:
+        if item.id in tags:
+            item.model_tag = tags[item.id]
+
+    if store:
+        store_tags(conn, tags, asked)
+
+    return {"ok": True, "tagged": len(tags), "asked": len(asked), "skipped": None}
+
+
 def store_tags(conn, tags_by_id: dict[str, str], asked_ids: set[str] | None = None) -> int:
     """Write the model's tags, touching only the items it was asked about.
 

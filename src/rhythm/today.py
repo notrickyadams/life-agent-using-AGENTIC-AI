@@ -84,6 +84,10 @@ class Item:
     # problem set, so the local model needs it to classify anything.
     description: str = ""
     matched_keywords: tuple[str, ...] = ()
+    # What the local model decided this is - lab, exam, quiz and so on.
+    # Filled in by the tag stage after the plan is built, so it is empty
+    # whenever Ollama is unavailable, which is a fine state to render.
+    model_tag: str = ""
     # Set when this item began before the day being planned. Its start time
     # belongs to that earlier day, so showing it here would claim the event
     # starts again this morning.
@@ -149,8 +153,11 @@ class Item:
             parts.append("(done)")
         elif self.needs_action:
             parts.append("(not turned in)" if self.submission_state else "(no submission record)")
-        if self.matched_keywords:
-            parts.append(f"[{', '.join(self.matched_keywords)}]")
+        labels = list(self.matched_keywords)
+        if self.model_tag and self.model_tag not in labels:
+            labels.append(self.model_tag)
+        if labels:
+            parts.append(f"[{', '.join(labels)}]")
         return " ".join(parts)
 
 

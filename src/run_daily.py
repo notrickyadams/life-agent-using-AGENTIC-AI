@@ -4,10 +4,10 @@ Entry point - the one script the scheduler runs.
 Stages, in order:
     1. collect   sync Google Calendar and Classroom into SQLite   (V1 step 1)
     2. plan      work out what is relevant today, by rhythm       (V1 step 2)
-    3. notion    write the day plan to the Notion page            (V1 step 3)
+    3. tag       label each item with the local model, free       (V1 step 4)
+    4. notion    write the day plan to the Notion page            (V1 step 3)
 
-Later steps add the local model and the single Claude call, behind this
-same file.
+The single paid Claude call joins as step 5, behind this same file.
 
 Each stage is isolated: a collector failing does not stop the other, and
 neither stops the plan being built from whatever is already stored.
@@ -35,6 +35,7 @@ from src import config
 from src.collectors import calendar, classroom
 from src.collectors.google_auth import SignInRequired
 from src.db import queries, schema
+from src.agent import tagger
 from src.notion import writer as notion_writer
 from src.notion.writer import NotionError
 from src.rhythm import today as rhythm_today
@@ -177,7 +178,39 @@ def run_pipeline(
         log.exception("plan stage failed")
         results["plan"] = plan_outcome
 
-    # --- stage 3: write it to Notion ----------------------------------------
+    # --- stage 3: label the items with the local model -----------------------
+    # Free and local, so it runs over every item the plan will show. Wholly
+    # optional: no Ollama means no labels, which is a perfectly good day
+    # plan. Nothing here can fail the run.
+    tag_outcome = {"ok": None, "tagged": 0, "error": None}
+    if plan is None:
+        log.debug("tagging skipped, there is no plan")
+    else:
+        try:
+            summary = tagger.tag_plan(conn, plan, store=not dry_run)
+            if summary["skipped"]:
+                # ok stays None - skipped, not failed. Ollama is optional,
+                # and its absence must not make a healthy run look broken or
+                # change the exit code the scheduler reads. The reason is
+                # recorded so the run still says why there are no labels.
+                log.info("tagging skipped: %s", summary["skipped"])
+                tag_outcome["error"] = summary["skipped"]
+                if not summary["ok"]:
+                    results["tag"] = tag_outcome
+            else:
+                tag_outcome["ok"] = True
+                tag_outcome["tagged"] = summary["tagged"]
+                results["tag"] = tag_outcome
+                log.info("tagging: %d of %d items labelled%s",
+                         summary["tagged"], summary["asked"],
+                         "" if not dry_run else " (not stored)")
+        except Exception as exc:  # noqa: BLE001 - labels must never fail a run
+            tag_outcome["ok"] = False
+            tag_outcome["error"] = f"{type(exc).__name__}: {exc}"
+            results["tag"] = tag_outcome
+            log.exception("tagging failed")
+
+    # --- stage 4: write it to Notion ----------------------------------------
     # Optional: with no Notion settings the pipeline still syncs and plans,
     # and simply records that the write was not attempted. Isolated like the
     # other stages, so a Notion outage never costs you the sync.
@@ -235,10 +268,14 @@ def run_pipeline(
         conn.rollback()
 
     if not dry_run:
+        # Only genuine FAILURES belong here. A stage that was skipped because
+        # something optional is absent has a reason, not an error, and
+        # recording it would make a healthy run look broken to anyone
+        # reading the runs table later.
         errors = [
             f"{n}: {r['error']}"
             for n, r in results.items()
-            if not n.startswith("_") and r.get("error")
+            if not n.startswith("_") and r.get("ok") is False and r.get("error")
         ]
         queries.finish_run(
             conn,

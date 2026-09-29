@@ -344,3 +344,46 @@ def test_a_healthy_run_sends_no_warnings(db, monkeypatch):
     run_daily.run_pipeline(db, {"calendar": lambda **_: [_row("calendar:1")]})
 
     assert captured["warnings"] == []
+
+
+# --- the tag stage ----------------------------------------------------------
+
+def test_tagging_never_fails_the_run(db, monkeypatch):
+    """Labels are a nicety. A day plan without them is still a day plan."""
+    def boom(*a, **k):
+        raise RuntimeError("ollama exploded")
+
+    monkeypatch.setattr(run_daily.tagger, "tag_plan", boom)
+
+    row = {**_row("calendar:1"), "due_at": "2099-01-01T09:00:00Z"}
+    results = run_daily.run_pipeline(db, {"calendar": lambda **_: [row]})
+
+    assert results["calendar"]["ok"] is True
+    assert results["plan"]["ok"] is True
+    assert results["tag"]["ok"] is False
+    assert "exploded" in results["tag"]["error"]
+
+
+def test_tagging_is_skipped_quietly_when_ollama_is_absent(db, monkeypatch):
+    monkeypatch.setattr(run_daily.tagger.local_model, "is_available", lambda: False)
+
+    # Something the plan will actually show, so the stage has work to skip.
+    row = {**_row("calendar:1"), "due_at": "2099-01-01T09:00:00Z"}
+    results = run_daily.run_pipeline(db, {"calendar": lambda **_: [row]})
+
+    assert results["plan"]["ok"] is True
+    # Skipped, not failed: Ollama is optional, so its absence must not make
+    # a healthy run report as broken. The reason is still recorded.
+    assert results["tag"]["ok"] is None
+    assert "Ollama is not running" in results["tag"]["error"]
+    assert queries.get_latest_run(db)["error"] is None
+
+
+def test_a_dry_run_tags_for_display_but_stores_nothing(db, monkeypatch):
+    monkeypatch.setattr(run_daily.tagger.local_model, "is_available", lambda: True)
+    monkeypatch.setattr(run_daily.tagger.local_model, "generate", lambda *a, **k: "lab")
+
+    row = {**_row("calendar:1"), "due_at": "2099-01-01T09:00:00Z"}
+    run_daily.run_pipeline(db, {"calendar": lambda **_: [row]}, dry_run=True)
+
+    assert db.execute("SELECT COUNT(*) AS n FROM tags").fetchone()["n"] == 0

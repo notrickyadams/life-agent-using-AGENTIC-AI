@@ -292,3 +292,118 @@ def test_a_negated_answer_yields_no_tag(answer):
 def test_a_plain_answer_still_works_after_the_negation_guard():
     assert parse_tag("lab") == "lab"
     assert parse_tag("Answer: quiz") == "quiz"
+
+
+# --- tag_plan: the stage the daily run calls --------------------------------
+
+def _plan_with(db, *titles):
+    from src.rhythm.config import Day, Rhythm
+    from src.rhythm.today import build_plan
+
+    for i, title in enumerate(titles):
+        queries.upsert_events(db, [{
+            "id": f"classroom:c/{i}", "source": "classroom", "type": "assignment",
+            "title": title, "submission_state": "CREATED", "raw_json": "{}",
+        }])
+    days = {d: Day(name=d) for d in
+            ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")}
+    rhythm = Rhythm(timezone="Africa/Cairo", due_soon_days=3, show_overdue=True, days=days)
+    return build_plan(db, rhythm, date(2026, 9, 21))
+
+
+def test_tag_plan_labels_the_items_and_stores_them(db, monkeypatch):
+    monkeypatch.setattr(tagger.local_model, "is_available", lambda: True)
+    monkeypatch.setattr(tagger.local_model, "generate", lambda *a, **k: "lab")
+
+    plan = _plan_with(db, "Assignment 1")
+    summary = tagger.tag_plan(db, plan)
+
+    assert summary["ok"] is True
+    assert summary["tagged"] == 1
+    assert plan.all_items()[0].model_tag == "lab"
+    assert queries.get_tags(db, "classroom:c/0", source=MODEL_TAG_SOURCE) == ["lab"]
+
+
+def test_tag_plan_changes_nothing_when_ollama_is_not_running(db, monkeypatch):
+    """No labels is a perfectly good day plan."""
+    monkeypatch.setattr(tagger.local_model, "is_available", lambda: False)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("the model was called while unavailable")
+
+    monkeypatch.setattr(tagger.local_model, "generate", must_not_run)
+
+    plan = _plan_with(db, "Assignment 1")
+    summary = tagger.tag_plan(db, plan)
+
+    assert summary["ok"] is False
+    assert "Ollama is not running" in summary["skipped"]
+    assert plan.all_items()[0].model_tag == ""
+
+
+def test_tag_plan_stores_nothing_on_a_dry_run(db, monkeypatch):
+    monkeypatch.setattr(tagger.local_model, "is_available", lambda: True)
+    monkeypatch.setattr(tagger.local_model, "generate", lambda *a, **k: "lab")
+
+    plan = _plan_with(db, "Assignment 1")
+    tagger.tag_plan(db, plan, store=False)
+
+    assert plan.all_items()[0].model_tag == "lab"          # shown
+    assert queries.get_tags(db, "classroom:c/0") == []     # not kept
+
+
+def test_tag_plan_only_classifies_what_the_plan_shows(db, monkeypatch):
+    """Work is bounded by what you will read, not by everything ever synced."""
+    monkeypatch.setattr(tagger.local_model, "is_available", lambda: True)
+    calls = []
+
+    def counting(prompt, **k):
+        calls.append(prompt)
+        return "lab"
+
+    monkeypatch.setattr(tagger.local_model, "generate", counting)
+
+    plan = _plan_with(db, "Shown 1", "Shown 2")
+    # A finished item, which the plan never shows.
+    queries.upsert_events(db, [{
+        "id": "classroom:c/done", "source": "classroom", "type": "assignment",
+        "title": "Finished", "submission_state": "TURNED_IN", "raw_json": "{}",
+    }])
+
+    tagger.tag_plan(db, plan)
+
+    assert len(calls) == 2
+    assert not any("Finished" in c for c in calls)
+
+
+def test_tag_plan_on_an_empty_plan_does_nothing(db, monkeypatch):
+    def must_not_run(*a, **k):
+        raise AssertionError("the model was called with nothing to tag")
+
+    monkeypatch.setattr(tagger.local_model, "is_available", must_not_run)
+
+    summary = tagger.tag_plan(db, _plan_with(db))
+
+    assert summary["ok"] is True
+    assert summary["tagged"] == 0
+
+
+def test_a_model_tag_appears_in_the_item_label(db, monkeypatch):
+    monkeypatch.setattr(tagger.local_model, "is_available", lambda: True)
+    monkeypatch.setattr(tagger.local_model, "generate", lambda *a, **k: "exam")
+
+    plan = _plan_with(db, "Assignment 1")
+    tagger.tag_plan(db, plan)
+
+    assert "[exam]" in plan.all_items()[0].label
+
+
+def test_a_model_tag_is_not_repeated_when_a_keyword_already_matched(db, monkeypatch):
+    monkeypatch.setattr(tagger.local_model, "is_available", lambda: True)
+    monkeypatch.setattr(tagger.local_model, "generate", lambda *a, **k: "exam")
+
+    plan = _plan_with(db, "Assignment 1")
+    plan.all_items()[0].matched_keywords = ("exam",)
+    tagger.tag_plan(db, plan)
+
+    assert plan.all_items()[0].label.count("exam") == 1
