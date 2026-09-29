@@ -101,8 +101,10 @@ def test_items_are_bucketed_by_date(db):
     assert [i.title for i in plan.overdue] == ["Past"]
     assert [i.title for i in plan.today] == ["Today"]
     assert [i.title for i in plan.due_soon] == ["Soon"]
-    assert plan.themed == []          # "Far" matches no keyword, so it is not shown
-    assert plan.total == 3
+    assert plan.themed == []          # "Far" matches no keyword...
+    assert [i.title for i in plan.later] == ["Far"]   # ...but is still shown
+    assert plan.total == 4
+    assert plan.urgent_total == 3
 
 
 def test_an_item_appears_in_only_one_bucket(db):
@@ -687,3 +689,59 @@ def test_a_long_description_is_trimmed(db):
               submission_state="CREATED", raw_json=raw)
 
     assert len(build_plan(db, make_rhythm(), TODAY).today[0].description) <= 400
+
+
+# --- the "later" bucket: nothing pending is ever invisible ------------------
+
+def test_work_beyond_the_due_soon_window_is_still_shown(db):
+    """The page must not say 'nothing due' while an assignment waits nine
+    days out. Correct about the urgent window, wrong about your week."""
+    add_event(db, "classroom:c/far", title="Assignment 1", due_at="2026-09-30T20:59:00Z",
+              submission_state="CREATED")
+
+    plan = build_plan(db, make_rhythm(due_soon_days=0), TODAY)
+
+    assert [i.title for i in plan.later] == ["Assignment 1"]
+    assert plan.is_empty is False
+
+
+def test_an_empty_plan_means_genuinely_nothing(db):
+    assert build_plan(db, make_rhythm(), TODAY).is_empty is True
+
+
+def test_urgent_total_ignores_what_is_merely_ahead(db):
+    add_event(db, "classroom:c/now", title="Due today", due_at="2026-09-21T20:59:00Z",
+              submission_state="CREATED")
+    add_event(db, "classroom:c/far", title="Far off", due_at="2026-11-30T20:59:00Z",
+              submission_state="CREATED")
+
+    plan = build_plan(db, make_rhythm(), TODAY)
+
+    assert plan.total == 2
+    assert plan.urgent_total == 1
+    assert [i.title for i in plan.later] == ["Far off"]
+
+
+def test_finished_work_never_reaches_later(db):
+    add_event(db, "classroom:c/done", title="Done", due_at="2026-11-30T20:59:00Z",
+              submission_state="TURNED_IN")
+
+    assert build_plan(db, make_rhythm(), TODAY).later == []
+
+
+def test_a_themed_item_goes_to_the_theme_section_not_later(db):
+    """Only one of the two - it must not be listed twice."""
+    add_event(db, "classroom:c/x", title="Final Exam", due_at="2026-11-30T20:59:00Z",
+              submission_state="CREATED")
+
+    plan = build_plan(db, make_rhythm(), TODAY)
+
+    assert [i.title for i in plan.themed] == ["Final Exam"]
+    assert plan.later == []
+
+
+def test_later_items_carry_their_date(db):
+    add_event(db, "classroom:c/far", title="Assignment 1", due_at="2026-10-08T20:59:00Z",
+              submission_state="CREATED")
+
+    assert "Thu 08 Oct" in format_plan(build_plan(db, make_rhythm(), TODAY))

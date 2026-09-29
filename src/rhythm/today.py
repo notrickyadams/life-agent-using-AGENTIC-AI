@@ -11,8 +11,14 @@ item never appears twice:
     overdue    past its due date and still not done   (most urgent)
     today      happening or due today
     due_soon   due within rhythm.due_soon_days, after today
+    later      everything else still ahead of you
     themed     matches today's keywords but is in none of the above,
                so a themed item is surfaced without being repeated
+
+`later` exists so the page is never falsely empty. Without it, an
+assignment due in nine days is filtered out of every bucket and the page
+says "nothing due" while you have work waiting - technically correct about
+the urgent window, and misleading about your week.
 
 Rules applied before any of that:
   - only rows with active = 1 (what Google last returned)
@@ -157,6 +163,7 @@ class DayPlan:
     overdue: list[Item] = field(default_factory=list)
     today: list[Item] = field(default_factory=list)
     due_soon: list[Item] = field(default_factory=list)
+    later: list[Item] = field(default_factory=list)
     themed: list[Item] = field(default_factory=list)
 
     # How old the underlying Google data is, in seconds, at the moment the
@@ -167,17 +174,22 @@ class DayPlan:
 
     @property
     def is_empty(self) -> bool:
-        """True when there is genuinely nothing to show."""
-        return not (self.overdue or self.today or self.due_soon or self.themed)
+        """True when there is genuinely nothing to show - not merely nothing urgent."""
+        return not self.all_items()
 
     @property
     def total(self) -> int:
         """How many items the plan holds in total."""
-        return len(self.overdue) + len(self.today) + len(self.due_soon) + len(self.themed)
+        return len(self.all_items())
+
+    @property
+    def urgent_total(self) -> int:
+        """How many items need attention now, ignoring what is merely ahead."""
+        return len(self.overdue) + len(self.today) + len(self.due_soon)
 
     def all_items(self) -> list[Item]:
         """Every item in the plan, in section order."""
-        return [*self.overdue, *self.today, *self.due_soon, *self.themed]
+        return [*self.overdue, *self.today, *self.due_soon, *self.later, *self.themed]
 
 
 # Data older than this is called out rather than shown as if it were current.
@@ -390,15 +402,21 @@ def build_plan(conn, rhythm: Rhythm, on: date | None = None) -> DayPlan:
             if rhythm.show_overdue and item.needs_action:
                 plan.overdue.append(item)
         elif when <= horizon:
-            # Upcoming. A finished assignment needs no reminder.
+            # Upcoming and close. A finished assignment needs no reminder.
             if not item.is_done:
                 plan.due_soon.append(item)
-        elif item.matched_keywords and not item.is_done:
-            # Further out, but it fits today's theme, so it is worth knowing.
-            # Finished work is never surfaced by a keyword match.
+        elif item.is_done:
+            pass                      # finished: never shown again
+        elif item.matched_keywords:
+            # Further out, but it fits today's theme - the theme section is
+            # the more useful place for it than a general list.
             plan.themed.append(item)
+        else:
+            # Further out and unremarkable. Still yours to do, so still
+            # shown - just last, and quietly.
+            plan.later.append(item)
 
-    for bucket in (plan.overdue, plan.today, plan.due_soon, plan.themed):
+    for bucket in (plan.overdue, plan.today, plan.due_soon, plan.later, plan.themed):
         bucket.sort(key=_sort_key)
 
     return plan
@@ -455,6 +473,7 @@ def format_plan(plan: DayPlan) -> str:
         ("TODAY", plan.today),
         ("DUE SOON", plan.due_soon),
         (f"FITS TODAY'S THEME ({plan.day.theme})" if plan.day.has_theme else "THEMED", plan.themed),
+        ("LATER", plan.later),
     ]
     for title, items in sections:
         if not items:

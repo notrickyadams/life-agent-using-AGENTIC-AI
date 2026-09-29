@@ -246,6 +246,9 @@ SECTION_TITLES = {
     "today": "Today",
     "due_soon": "Due soon",
     "themed": "Fits today's theme",
+    # Last, and deliberately present: without it the page claims nothing is
+    # due while work sits nine days out.
+    "later": "Later",
 }
 
 

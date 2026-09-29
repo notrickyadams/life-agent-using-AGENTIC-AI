@@ -737,3 +737,28 @@ def test_warnings_are_written_through_to_the_page(db):
                       warnings=["Google needs you to sign in again"])
 
     assert any("sign in again" in writer.block_text(b) for b in client.page_blocks)
+
+
+def test_the_later_section_reaches_the_page(db):
+    """Regression: work nine days out was invisible in Notion."""
+    _add(db, "classroom:c/far", title="Assignment 1", due_at="2026-10-08T20:59:00Z",
+         submission_state="CREATED")
+
+    texts = _texts(writer.render_plan(build_plan(db, _rhythm(), MONDAY)))
+
+    assert any(t.startswith("Later (1)") for t in texts)
+    assert any("Assignment 1" in t for t in texts)
+    assert not any("Nothing scheduled" in t for t in texts)
+
+
+def test_later_comes_after_the_urgent_sections(db):
+    _add(db, "classroom:c/now", title="Due today", due_at="2026-09-21T20:59:00Z",
+         submission_state="CREATED")
+    _add(db, "classroom:c/far", title="Far off", due_at="2026-11-30T20:59:00Z",
+         submission_state="CREATED")
+
+    texts = _texts(writer.render_plan(build_plan(db, _rhythm(), MONDAY)))
+    headings = [i for i, t in enumerate(texts) if t.startswith(("Today (", "Later ("))]
+
+    assert texts[headings[0]].startswith("Today")
+    assert texts[headings[1]].startswith("Later")
