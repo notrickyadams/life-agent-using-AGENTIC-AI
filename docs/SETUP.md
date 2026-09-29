@@ -124,6 +124,36 @@ mistake rather than silently ignoring the line.
 
 ---
 
+## 5. Make it run by itself each morning  — step 6
+
+From PowerShell, in the project folder:
+
+    .\scripts\install_scheduler.ps1
+
+Default is 07:00. To pick another time:
+
+    .\scripts\install_scheduler.ps1 -Time 06:30
+
+Safe to run again - it replaces the task rather than adding a second one.
+
+Three choices are built into it:
+
+- **It never opens a browser.** A scheduled run that hit a sign-in prompt
+  would hang forever, and nothing after it would run. Instead it records
+  the failure, and your Notion page says in red that you need to sign in.
+- **A missed run catches up.** If the laptop is shut at 07:00 it runs when
+  you next open it, rather than skipping the day in silence.
+- **It runs only while you are logged in**, so no password is stored
+  anywhere.
+
+Useful afterwards:
+
+    Get-ScheduledTaskInfo -TaskName "Life Agent daily"    when it last ran
+    Start-ScheduledTask   -TaskName "Life Agent daily"    run it right now
+    .\scripts\install_scheduler.ps1 -Remove              stop it entirely
+
+---
+
 ## The one you will actually use
 
 **Double-click `refresh.bat`** in the project folder. It reads Google,
