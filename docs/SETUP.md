@@ -124,8 +124,22 @@ mistake rather than silently ignoring the line.
 
 ---
 
+## The one you will actually use
+
+**Double-click `refresh.bat`** in the project folder. It reads Google,
+works out your day, writes it to Notion, and tells you what happened. About
+twenty seconds. The window stays open so you can read it.
+
+Worth doing once: right-click `refresh.bat` -> **Send to** -> **Desktop
+(create shortcut)**, so it is one click from anywhere. You can rename the
+shortcut to anything you like.
+
+Once the scheduler is set up (step 6) you will rarely need even this - it
+will run by itself each morning. Until then, this is "refresh my day".
+
 ## Everyday commands
 
+    refresh.bat                          the same thing, double-clickable
     python -m src.run_daily              sync, plan, write to Notion
     python -m src.run_daily --dry-run    same, but writes nothing anywhere
     python -m src.rhythm.today           sync and show today in the terminal
