@@ -102,6 +102,39 @@ def test_no_saved_token_and_no_browser_allowed_also_raises(token_dir, monkeypatc
         google_auth.get_credentials(["scope"], "classroom", allow_browser=False)
 
 
+def _fake_browser_sign_in(token_dir, monkeypatch):
+    """Stand in for the browser sign-in, which would otherwise open a real
+    browser and wait for you."""
+    (token_dir / "credentials.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")   # restored after the test
+
+    class FakeFlow:
+        def run_local_server(self, port):
+            return FakeCreds(valid=True)
+
+    monkeypatch.setattr(google_auth.InstalledAppFlow, "from_client_secrets_file",
+                        classmethod(lambda cls, *a, **k: FakeFlow()))
+
+
+def test_a_browser_sign_in_saves_the_token(token_dir, monkeypatch):
+    _fake_browser_sign_in(token_dir, monkeypatch)
+
+    google_auth.get_credentials(["scope"], "calendar")
+
+    assert google_auth.token_path("calendar").exists()
+
+
+def test_a_dry_run_that_needs_a_sign_in_still_writes_no_token_file(token_dir, monkeypatch):
+    """--dry-run promises to write nothing. A sign-in during one used to be
+    saved anyway, because only the refresh path checked `save`."""
+    _fake_browser_sign_in(token_dir, monkeypatch)
+
+    creds = google_auth.get_credentials(["scope"], "calendar", save=False)
+
+    assert creds.valid                                   # the run still works
+    assert not google_auth.token_path("calendar").exists()
+
+
 def test_each_source_keeps_its_own_token_file(token_dir):
     assert google_auth.token_path("calendar").name == "token_calendar.json"
     assert google_auth.token_path("classroom").name == "token_classroom.json"

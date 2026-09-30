@@ -7,7 +7,10 @@ Nothing here touches Google. The fixtures mirror the real shapes seen with
 import json
 from pathlib import Path
 
+import pytest
+
 from src.collectors import calendar
+from src.db import queries
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -171,6 +174,59 @@ def test_fetch_follows_pagination():
     assert [e["id"] for e in events] == ["a", "b", "c"]
     assert len(service.events().calls) == 2
     assert service.events().calls[0]["singleEvents"] is True
+
+
+# --- sync_calendar: the manual `--sync` command ------------------------------
+
+def _raw_event(event_id: str) -> dict:
+    return {
+        "id": event_id, "summary": event_id,
+        "start": {"dateTime": "2026-10-01T09:00:00+03:00"},
+        "end": {"dateTime": "2026-10-01T10:00:00+03:00"},
+    }
+
+
+def _one_calendar(monkeypatch, *event_ids: str) -> FakeService:
+    monkeypatch.setattr(calendar.config, "CALENDAR_IDS", ["primary"])
+    monkeypatch.setattr(calendar.config, "CALENDAR_INCLUDE_CLASSROOM", False)
+    return FakeService(
+        [{"id": "me@example.com", "summary": "me@example.com", "primary": True}],
+        event_pages=[{"items": [_raw_event(e) for e in event_ids]}],
+    )
+
+
+def test_sync_calendar_is_a_full_sync(db, monkeypatch, ticking_clock):
+    """`python -m src.collectors.calendar --sync` used to only save rows: an
+    event deleted in Google stayed active, no run was recorded, and the
+    "Google data:" time never moved. It must do what the daily run does."""
+    calendar.sync_calendar(db, _one_calendar(monkeypatch, "a", "b"))
+    calendar.sync_calendar(db, _one_calendar(monkeypatch, "a"))    # "b" deleted in Google
+
+    assert queries.get_event(db, "calendar:a")["active"] == 1
+    assert queries.get_event(db, "calendar:b")["active"] == 0
+
+    run = queries.get_latest_run(db)
+    assert run["finished_at"] is not None
+    assert run["calendar_ok"] == 1
+    assert queries.last_successful_sync(db, "calendar") is not None
+
+
+def test_a_failed_sync_calendar_is_recorded_and_hides_nothing(db, monkeypatch, ticking_clock):
+    """A sync that fails must not flag anything inactive - it never saw what
+    Google has - and the run must say it failed."""
+    calendar.sync_calendar(db, _one_calendar(monkeypatch, "a"))
+
+    class Broken(FakeService):
+        def events(self):
+            raise RuntimeError("Calendar API exploded")
+
+    with pytest.raises(RuntimeError, match="exploded"):
+        calendar.sync_calendar(db, Broken([{"id": "me@example.com", "primary": True}]))
+
+    assert queries.get_event(db, "calendar:a")["active"] == 1
+    run = queries.get_latest_run(db)
+    assert run["calendar_ok"] == 0
+    assert "exploded" in run["error"]
 
 
 # --- classroom_ref_from_description -----------------------------------------

@@ -114,8 +114,17 @@ def get_credentials(
     flow = InstalledAppFlow.from_client_secrets_file(str(config.GOOGLE_CREDENTIALS_FILE), scopes)
     # port=0 lets the OS pick any free port for the one-time local redirect.
     creds = flow.run_local_server(port=0)
-    _save(creds, path)
-    log.info("Saved %s token to %s", token_name, path)
+    if save:
+        _save(creds, path)
+        log.info("Saved %s token to %s", token_name, path)
+    else:
+        # A dry run promises to write nothing, and a token file is a write.
+        # The cost: this sign-in is used for this run only, so the next
+        # real run will ask you to sign in again.
+        log.warning(
+            "Signed in for %s, but NOT saved (dry run). The next real run will "
+            "ask you to sign in again.", token_name,
+        )
     # What Google actually granted. If this ever differs from `scopes`, the
     # library raises before we get here - this line is so the log shows the
     # real permissions the token carries.

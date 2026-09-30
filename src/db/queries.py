@@ -10,6 +10,8 @@ Writing:
   upsert_events(conn, events)            the same for a list, one commit at the end
   start_run(conn, started_at) -> run_id  record that a pipeline run began
   mark_unseen_inactive(conn, source, since)  flag rows a successful sync did not return
+  store_sync(conn, source, rows, run_id, started_at)  all of a successful sync, together
+  sync_source_alone(conn, source, fetch) one source, recorded as its own run
   set_tags(conn, event_id, tags, source) replace one source's tags on an event
   finish_run(conn, run_id, ...)          record how it ended
 
@@ -140,6 +142,60 @@ def mark_unseen_inactive(conn: sqlite3.Connection, source: str, since: str) -> i
     )
     conn.commit()
     return cursor.rowcount
+
+
+def store_sync(conn: sqlite3.Connection, source: str, rows: list[dict],
+               run_id: int, started_at: str) -> int:
+    """Store one source's SUCCESSFUL sync. Returns how many rows went inactive.
+
+    The three steps that make a sync complete, always together, in this
+    order:
+      1. save the rows Google returned
+      2. flag this source's rows Google did NOT return this time
+      3. stamp the moment this source synced (what "Google data:" shows)
+
+    `started_at` must be read BEFORE fetching from Google - normally the
+    run's own start time. Step 2 flags every row last saved before it, so
+    passing "now, after saving" instead flags the rows that were just saved
+    whenever saving crossed into a new second, and your work disappears
+    from the plan. That is why this takes the time as an argument rather
+    than reading the clock itself.
+
+    Only call this when the fetch succeeded: after a failed one, step 2
+    would flag everything.
+    """
+    upsert_events(conn, rows)
+    inactive = mark_unseen_inactive(conn, source, started_at)
+    record_source_synced(conn, run_id, source)
+    return inactive
+
+
+def sync_source_alone(conn: sqlite3.Connection, source: str, fetch) -> int:
+    """Sync ONE source as a run of its own. Returns how many rows were saved.
+
+    For the collectors' manual `--sync` commands, which used to only save
+    rows: something deleted in Google stayed active, no run was recorded,
+    and the "Google data:" time never moved. This does all of it, exactly
+    as the daily run does - via store_sync - and records the run.
+
+    `fetch` is a function that asks Google and returns the rows. If it
+    fails, the run is recorded as failed, nothing is flagged inactive, and
+    the error is raised again for the caller to show.
+    """
+    if source not in _SYNCED_COLUMN:
+        raise ValueError(f"unknown source {source!r}")
+
+    started_at = utc_now_iso()          # BEFORE fetching - see store_sync
+    run_id = start_run(conn, started_at)
+    try:
+        rows = fetch()
+        store_sync(conn, source, rows, run_id, started_at)
+    except Exception as exc:
+        finish_run(conn, run_id, **{f"{source}_ok": False},
+                   error=f"{source}: {type(exc).__name__}: {exc}")
+        raise
+    finish_run(conn, run_id, **{f"{source}_ok": True})
+    return len(rows)
 
 
 def finish_run(

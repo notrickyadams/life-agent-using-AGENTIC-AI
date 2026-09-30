@@ -6,7 +6,7 @@ Same three layers as the calendar collector:
   fetch_coursework(...) / fetch_my_submissions(...)   talk to Google   [network]
   parse_coursework(raw, ...)                          raw -> DB row    [pure, testable]
   collect_classroom()                                 fetch -> parse, writes nothing
-  sync_classroom(conn)                                collect -> upsert      [glue]
+  sync_classroom(conn)                                collect -> full sync, recorded as a run  [glue]
 
 Classroom has no "between these dates" filter, so this pulls ALL coursework
 from every ACTIVE course and stores it. Deciding which of it matters today
@@ -165,11 +165,14 @@ def collect_classroom(service=None, *, allow_browser: bool = True, save_token: b
 
 
 def sync_classroom(conn, service=None) -> int:
-    """collect_classroom() + upsert. Returns the number of rows written."""
+    """A complete Classroom sync, recorded as a run. Returns the number of rows written.
+
+    The same as the daily run's Classroom step: saves the rows, flags work
+    Classroom no longer returns as inactive, and stamps the sync time.
+    """
     from src.db import queries
 
-    rows = collect_classroom(service)
-    written = queries.upsert_events(conn, rows)
+    written = queries.sync_source_alone(conn, "classroom", lambda: collect_classroom(service))
     log.info("classroom sync wrote %d rows", written)
     return written
 

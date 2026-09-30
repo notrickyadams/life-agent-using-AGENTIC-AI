@@ -102,6 +102,32 @@ def no_real_files(monkeypatch, tmp_path):
 
 
 @pytest.fixture
+def ticking_clock(monkeypatch):
+    """Make every timestamp the database writes one second later than the last.
+
+    Real syncs are fast enough that most of their timestamps land in the same
+    second, so a bug that depends on WHICH second something happened in shows
+    up only now and then (about 1 run in 200 for items going missing). With
+    the clock ticking on every read, that case happens on every run, so a
+    test for it cannot pass by luck.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from src.db import queries
+
+    start = datetime(2026, 9, 30, 10, 0, 0, tzinfo=timezone.utc)
+    ticks = {"n": 0}
+
+    def tick() -> str:
+        ticks["n"] += 1
+        moment = start + timedelta(seconds=ticks["n"])
+        return moment.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    monkeypatch.setattr(queries, "utc_now_iso", tick)
+    return tick
+
+
+@pytest.fixture
 def fake_credentials():
     """An empty Google credentials file in the test's temporary folder.
 

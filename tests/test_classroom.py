@@ -129,6 +129,25 @@ def test_sync_classroom_writes_rows_and_joins_submissions(db):
     ]
 
 
+def test_sync_classroom_is_a_full_sync(db, ticking_clock):
+    """Like the calendar's: work removed from Classroom goes inactive, and
+    the run and its sync time are recorded."""
+    work = _load("classroom_coursework.json")
+    removed = {**work, "id": "700000000002", "title": "Removed later"}
+    course = [{"id": "111111111111", "name": "Data Structures"}]
+
+    classroom.sync_classroom(db, FakeClassroom(course, {"111111111111": [work, removed]}, {}))
+    classroom.sync_classroom(db, FakeClassroom(course, {"111111111111": [work]}, {}))
+
+    assert queries.get_event(db, "classroom:111111111111/700000000001")["active"] == 1
+    assert queries.get_event(db, "classroom:111111111111/700000000002")["active"] == 0
+
+    run = queries.get_latest_run(db)
+    assert run["classroom_ok"] == 1
+    assert run["finished_at"] is not None
+    assert queries.last_successful_sync(db, "classroom") is not None
+
+
 def test_sync_classroom_is_idempotent(db):
     work = _load("classroom_coursework.json")
     service = FakeClassroom(

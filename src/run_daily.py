@@ -130,13 +130,10 @@ def run_pipeline(
                 for row in rows:
                     queries.upsert_event(conn, row)
             else:
-                queries.upsert_events(conn, rows)
-                # Anything from this source that Google did NOT return this
-                # time is flagged, never deleted. Only safe after success.
-                outcome["inactive"] = queries.mark_unseen_inactive(conn, name, started_at)
-                # Stamped here, the moment this source succeeded, so the
-                # plan built below sees THIS run rather than the last one.
-                queries.record_source_synced(conn, run_id, name)
+                # Save, flag what Google no longer returns (never deleted),
+                # and stamp this source as synced - so the plan built below
+                # sees THIS run rather than the last one. Only after success.
+                outcome["inactive"] = queries.store_sync(conn, name, rows, run_id, started_at)
             outcome["ok"] = True
             log.info("%s: %d rows%s", name, len(rows),
                      f", {outcome['inactive']} now inactive" if outcome["inactive"] else "")

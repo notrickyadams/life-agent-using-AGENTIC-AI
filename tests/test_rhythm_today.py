@@ -851,3 +851,46 @@ def test_an_all_day_event_has_no_time_range(db):
               end_at="2026-09-22", all_day=1)
 
     assert build_plan(db, make_rhythm(), TODAY).today[0].label == "All day"
+
+
+# --- the `python -m src.rhythm.today` command --------------------------------
+
+def test_the_today_command_never_hides_what_it_just_synced(db, tmp_path, monkeypatch, capsys,
+                                                         ticking_clock):
+    """Its sync used to mark rows inactive using the time AFTER saving, so a
+    save that crossed into a new second flagged the rows it had just saved -
+    and your work vanished from the plan until the next daily run. The
+    ticking clock makes that happen every time."""
+    import sys
+
+    from src import run_daily
+    from src.db import schema
+    from src.rhythm import today
+
+    def rows(**_):
+        return [
+            {"id": f"classroom:1/{n}", "source": "classroom", "type": "assignment",
+             "title": f"Owed work {n}", "due_at": None, "course_name": "Networks",
+             "raw_json": "{}"}
+            for n in (1, 2)
+        ]
+
+    monkeypatch.setattr(run_daily, "COLLECTORS", {"classroom": rows})
+    # A second connection to the test database: the command closes its own.
+    monkeypatch.setattr(schema, "connect", lambda *a, **k: sqlite_connect(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["today"])
+
+    assert today._main() == 0
+
+    assert queries.get_event(db, "classroom:1/1")["active"] == 1
+    assert queries.get_event(db, "classroom:1/2")["active"] == 1
+    shown = capsys.readouterr().out
+    assert "Owed work 1" in shown and "Owed work 2" in shown
+
+
+def sqlite_connect(tmp_path):
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "test.db")
+    conn.row_factory = sqlite3.Row
+    return conn

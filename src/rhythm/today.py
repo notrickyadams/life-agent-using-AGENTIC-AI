@@ -607,13 +607,16 @@ def _main() -> int:
             from src.db import queries
             from src.run_daily import COLLECTORS
 
-            run_id = queries.start_run(conn)
+            # The start time is read ONCE, before anything is fetched. Rows
+            # older than it that Google did not return are flagged inactive;
+            # reading the clock after saving instead flagged the rows just
+            # saved, whenever saving crossed into a new second.
+            started_at = queries.utc_now_iso()
+            run_id = queries.start_run(conn, started_at)
             ok = {}
             for name, collect in COLLECTORS.items():
                 try:
-                    queries.upsert_events(conn, collect(allow_browser=True))
-                    queries.mark_unseen_inactive(conn, name, queries.utc_now_iso())
-                    queries.record_source_synced(conn, run_id, name)
+                    queries.store_sync(conn, name, collect(allow_browser=True), run_id, started_at)
                     ok[name] = True
                 except Exception as exc:  # noqa: BLE001 - one source must not stop the other
                     ok[name] = False

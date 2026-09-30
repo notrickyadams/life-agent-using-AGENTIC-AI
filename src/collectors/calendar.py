@@ -6,7 +6,7 @@ Three layers, kept deliberately separate:
   fetch_calendar_events(...)   talks to Google, returns raw dicts       [network]
   parse_calendar_event(raw)    turns one raw dict into a flat DB row    [pure, testable]
   collect_calendar()           fetch -> parse, returns rows, writes nothing
-  sync_calendar(conn)          collect -> upsert, returns count         [glue]
+  sync_calendar(conn)          collect -> full sync, recorded as a run  [glue]
 
 This module never decides what is important. It only mirrors what Google
 has into the events table. Judgement is the agent loop's job (later steps).
@@ -293,11 +293,14 @@ def collect_calendar(service=None, *, allow_browser: bool = True, save_token: bo
 
 
 def sync_calendar(conn, service=None) -> int:
-    """collect_calendar() + upsert. Returns the number of rows written."""
+    """A complete calendar sync, recorded as a run. Returns the number of rows written.
+
+    The same as the daily run's calendar step: saves the rows, flags events
+    Google no longer returns as inactive, and stamps the sync time.
+    """
     from src.db import queries  # imported here so the pure parts above stay import-light
 
-    rows = collect_calendar(service)
-    written = queries.upsert_events(conn, rows)
+    written = queries.sync_source_alone(conn, "calendar", lambda: collect_calendar(service))
     log.info("calendar sync wrote %d events", written)
     return written
 
