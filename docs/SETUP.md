@@ -141,8 +141,13 @@ Three choices are built into it:
 - **It never opens a browser.** A scheduled run that hit a sign-in prompt
   would hang forever, and nothing after it would run. Instead it records
   the failure, and your Notion page says in red that you need to sign in.
-- **A missed run catches up.** If the laptop is shut at 07:00 it runs when
-  you next open it, rather than skipping the day in silence.
+- **Two triggers: 07:00, and when you log in.** A daily alarm cannot
+  survive a closed laptop - the first real morning, the 07:00 run was
+  recorded as missed and simply waited for the next day, leaving a page a
+  day out of date with nothing on it to say so. The logon trigger runs
+  `--if-stale 6`, which does nothing at all when the page is less than six
+  hours old, so signing in repeatedly costs nothing while opening a laptop
+  that was shut overnight refreshes it.
 - **It runs only while you are logged in**, so no password is stored
   anywhere.
 

@@ -17,9 +17,16 @@
                   Instead it records the failure, and the Notion page says
                   in red that you need to sign in.
 
-    Missed runs   The task is set to start as soon as possible after a
-                  missed start. A laptop that was shut at 07:00 runs when
-                  you open it, rather than skipping the day silently.
+    Two triggers  A daily alarm cannot survive a closed laptop. Windows'
+                  "start when available" was supposed to catch up and did
+                  not - it recorded a missed run and waited for tomorrow,
+                  leaving a day-old page with nothing to say so.
+
+                  So there are two triggers: the daily one, and one at
+                  logon. The logon trigger passes --if-stale 6, which does
+                  nothing at all if the data is less than six hours old, so
+                  logging in repeatedly costs nothing while opening a
+                  laptop that has been shut overnight refreshes it.
 
     Logged on     Runs only while you are logged in, so no password has to
                   be stored anywhere.
@@ -73,11 +80,18 @@ try {
 
 # -Quiet: the plan still goes to Notion and the log; nobody is watching a
 # console at 07:00, and an unread console window is just clutter.
+# The daily run always syncs. The logon run only syncs if the page is
+# already stale, so logging in several times a day costs nothing.
 $Action = New-ScheduledTaskAction -Execute $Python `
-    -Argument "-m src.run_daily --no-browser --quiet" `
+    -Argument "-m src.run_daily --no-browser --quiet --if-stale 6" `
     -WorkingDirectory $Root
 
-$Trigger = New-ScheduledTaskTrigger -Daily -At $When
+$DailyTrigger = New-ScheduledTaskTrigger -Daily -At $When
+
+# Delayed a couple of minutes so signing in never feels slower, and so the
+# network has time to come up.
+$LogonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$LogonTrigger.Delay = "PT2M"
 
 $Settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
@@ -94,7 +108,7 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
 }
 
 Register-ScheduledTask -TaskName $TaskName `
-    -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal `
+    -Action $Action -Trigger $DailyTrigger, $LogonTrigger -Settings $Settings -Principal $Principal `
     -Description "Reads Google Calendar and Classroom, works out the day, writes it to Notion." | Out-Null
 
 Write-Host ""
@@ -103,7 +117,9 @@ Write-Host ""
 Write-Host "  It runs:     $Python -m src.run_daily --no-browser --quiet"
 Write-Host "  Working dir: $Root"
 Write-Host ""
-Write-Host "  If the laptop is off at $Time, it runs when you next open it."
+Write-Host "  It also runs when you log in, but only if the page is more than"
+Write-Host "  six hours old - so a laptop shut overnight refreshes on opening,"
+Write-Host "  and logging in repeatedly costs nothing."
 Write-Host "  It will never open a browser - if Google needs you to sign in,"
 Write-Host "  your Notion page says so in red."
 Write-Host ""

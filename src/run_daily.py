@@ -22,6 +22,8 @@ Usage:
     python -m src.run_daily --quiet     no plan printout (the log still has it)
     python -m src.run_daily --no-browser  for scheduled runs: fail rather than
                                           wait at a browser sign-in prompt
+    python -m src.run_daily --if-stale 6  do nothing unless the data is over
+                                          6 hours old (used by the login trigger)
 
 Exit codes (the scheduler reads these):
     0  everything succeeded
@@ -344,6 +346,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--quiet", action="store_true", help="do not print the plan (the log still has it)")
     parser.add_argument("--no-browser", action="store_true",
                         help="never open a browser to sign in; fail instead (use this for scheduled runs)")
+    parser.add_argument("--if-stale", type=float, metavar="HOURS",
+                        help="do nothing if the data is younger than HOURS old "
+                             "(lets a login trigger run often without cost)")
     args = parser.parse_args(argv)
 
     sys.stdout.reconfigure(encoding="utf-8")
@@ -360,6 +365,19 @@ def main(argv: list[str] | None = None) -> int:
     added = schema.init_db(conn)
     if added:
         log.info("database updated: added %s", ", ".join(added))
+
+    # --if-stale makes a run cheap to TRIGGER often. A daily alarm cannot
+    # survive a closed laptop, so the scheduler also fires at login - and
+    # without this that would mean a full sync every time you log in.
+    # Checked before any network call, so a pointless run costs nothing.
+    if args.if_stale is not None:
+        age = queries.data_age_seconds(conn)
+        if age is not None and age < args.if_stale * 3600:
+            log.info("nothing to do: data is %.1f hours old, newer than the %.1f hour limit",
+                     age / 3600, args.if_stale)
+            conn.close()
+            return 0
+
     try:
         results = run_pipeline(conn, COLLECTORS, dry_run=args.dry_run,
                                allow_browser=not args.no_browser)

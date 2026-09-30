@@ -471,3 +471,58 @@ def test_synthesis_off_means_no_summary_at_all(db, monkeypatch):
     results = run_daily.run_pipeline(db, {"classroom": lambda **_: [_urgent_row()]})
 
     assert "summary" not in results
+
+
+# --- --if-stale, the gate that makes a login trigger cheap ------------------
+
+def test_if_stale_does_nothing_when_the_data_is_fresh(db, monkeypatch):
+    """The login trigger fires every time you sign in; without this gate
+    that would mean a full sync each time."""
+    _mark_fresh(db)
+
+    def must_not_run(**_):
+        raise AssertionError("a fresh run synced anyway")
+
+    monkeypatch.setattr(run_daily, "COLLECTORS", {"calendar": must_not_run})
+    monkeypatch.setattr(run_daily.schema, "connect", lambda *a, **k: db)
+
+    assert run_daily.main(["--if-stale", "6"]) == 0
+
+
+def test_if_stale_runs_when_the_data_is_old(db, monkeypatch):
+    """A laptop shut overnight must refresh when it opens."""
+    _mark_fresh(db, at="2026-01-01T00:00:00Z")
+    ran = []
+
+    monkeypatch.setattr(run_daily, "COLLECTORS",
+                        {"calendar": lambda **_: ran.append(True) or []})
+    monkeypatch.setattr(run_daily.schema, "connect", lambda *a, **k: db)
+
+    run_daily.main(["--if-stale", "6", "--quiet"])
+
+    assert ran == [True]
+
+
+def test_if_stale_runs_when_nothing_has_ever_synced(db, monkeypatch):
+    """No history is not the same as fresh."""
+    ran = []
+
+    monkeypatch.setattr(run_daily, "COLLECTORS",
+                        {"calendar": lambda **_: ran.append(True) or []})
+    monkeypatch.setattr(run_daily.schema, "connect", lambda *a, **k: db)
+
+    run_daily.main(["--if-stale", "6", "--quiet"])
+
+    assert ran == [True]
+
+
+def _mark_fresh(db, at=None):
+    run_id = queries.start_run(db)
+    for source in ("calendar", "classroom"):
+        queries.record_source_synced(db, run_id, source)
+    if at:
+        db.execute(
+            "UPDATE runs SET calendar_synced_at = ?, classroom_synced_at = ? WHERE run_id = ?",
+            (at, at, run_id),
+        )
+        db.commit()
