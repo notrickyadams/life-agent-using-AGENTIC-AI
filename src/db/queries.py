@@ -277,6 +277,16 @@ def get_tags(conn: sqlite3.Connection, event_id: str, source: str | None = None)
 
 # --- Notion block bookkeeping ------------------------------------------------
 
+def _page_key(page_id: str) -> str:
+    """One spelling per Notion page id.
+
+    Notion shows the same id as 32 characters or in the dashed 8-4-4-4-12
+    form. Stored as typed, pasting the other form into .env made the agent
+    lose its record of its own blocks - and then refuse to write the page.
+    """
+    return page_id.replace("-", "").strip().lower()
+
+
 def record_notion_blocks(conn: sqlite3.Connection, page_id: str, block_ids: list[str]) -> int:
     """Remember the blocks the agent just created on a Notion page.
 
@@ -287,17 +297,22 @@ def record_notion_blocks(conn: sqlite3.Connection, page_id: str, block_ids: list
     now = utc_now_iso()
     conn.executemany(
         "INSERT OR REPLACE INTO notion_blocks (block_id, page_id, written_at) VALUES (?, ?, ?)",
-        [(block_id, page_id, now) for block_id in block_ids],
+        [(block_id, _page_key(page_id), now) for block_id in block_ids],
     )
     conn.commit()
     return len(block_ids)
 
 
 def get_notion_blocks(conn: sqlite3.Connection, page_id: str) -> list[str]:
-    """The block ids the agent previously wrote to this page, oldest first."""
+    """The block ids the agent previously wrote to this page, oldest first.
+
+    Matched on the normalised id on BOTH sides, so rows recorded before ids
+    were normalised are still found.
+    """
     rows = conn.execute(
-        "SELECT block_id FROM notion_blocks WHERE page_id = ? ORDER BY written_at, rowid",
-        (page_id,),
+        "SELECT block_id FROM notion_blocks WHERE REPLACE(LOWER(page_id), '-', '') = ? "
+        "ORDER BY written_at, rowid",
+        (_page_key(page_id),),
     ).fetchall()
     return [row["block_id"] for row in rows]
 

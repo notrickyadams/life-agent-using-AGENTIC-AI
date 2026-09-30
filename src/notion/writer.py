@@ -475,19 +475,29 @@ def delete_blocks(client, block_ids: list[str], keep_with_children: bool = True
 
 
 def _has_children(client, block_id: str) -> bool:
-    """True when something is nested under this block.
+    """True when something is - or MIGHT be - nested under this block.
 
-    On any doubt this answers False, so an unreadable block is still tidied
-    up rather than accumulating forever. The case it protects against - a
-    note you indented under one of the agent's bullets - is rare, and its
-    children are readable when it happens.
+    On doubt this answers True, so the block is kept for this run. Deleting
+    a block deletes everything under it, so guessing "no children" when
+    Notion would not say could take a note you indented under one of the
+    agent's bullets with it, silently. Guessing "children" costs one stale
+    bullet on the page for one run: it stays on the agent's list and is
+    tried again next run. (notion-client already retries this read on rate
+    limits and server errors, so reaching here means those retries failed.)
+
+    "Not found" is not doubt: the block, and anything under it, is already
+    gone - so False, and the delete that follows files it as already gone.
     """
     from notion_client.errors import APIResponseError
 
     try:
         return bool(client.blocks.retrieve(block_id=block_id).get("has_children"))
-    except (APIResponseError, AttributeError, KeyError):
-        return False
+    except APIResponseError as exc:
+        if exc.code == "object_not_found":
+            return False
+        log.warning("could not check block %s for nested notes (%s) - keeping it this run",
+                    block_id, exc.code)
+        return True
 
 
 def write_plan(conn, client, plan, page_id: str | None = None,

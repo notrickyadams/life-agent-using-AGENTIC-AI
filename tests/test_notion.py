@@ -520,6 +520,11 @@ class WritableNotion(FakeNotion):
                 outer.page_blocks = [b for b in outer.page_blocks if b.get("id") != block_id]
                 return {"id": block_id, "archived": True}
 
+            def retrieve(self, block_id):
+                # The real client always has this; the writer calls it before
+                # every delete to look for notes nested under the block.
+                return {"id": block_id, "has_children": False}
+
         self.blocks = _Blocks()
 
 
@@ -863,16 +868,52 @@ def test_a_kept_block_is_deleted_once_its_children_are_gone(db):
     assert first[1] in client.deleted
 
 
-def test_an_unreadable_block_is_still_tidied_up(db):
-    """On doubt, delete - otherwise unreadable blocks accumulate forever."""
-    client = DeletableNotion(blocks=[], retrieve_error=_api_error("internal_server_error"))
+def test_a_block_that_cannot_be_checked_is_kept_not_deleted(db):
+    """On doubt, KEEP. If Notion will not say whether a block has your note
+    nested under it, deleting it could take the note with it - silently.
+    Keeping it costs one stale bullet for one run, which you can see."""
+    client = DeletableNotion(blocks=[])
     writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
     first = queries.get_notion_blocks(db, PAGE)
 
+    client._retrieve_error = _api_error("internal_server_error")
+    result = writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert result["kept"] == len(first)
+    assert client.deleted == []
+    # Still on the agent's list, so the next run tries again.
+    assert set(first) <= set(queries.get_notion_blocks(db, PAGE))
+
+
+def test_a_kept_unreadable_block_is_tidied_up_once_notion_answers(db):
+    """Keeping is for one run, not forever: once the check works again,
+    the old block is deleted as usual."""
+    client = DeletableNotion(blocks=[])
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    first = queries.get_notion_blocks(db, PAGE)
+
+    client._retrieve_error = _api_error("internal_server_error")
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    client._retrieve_error = None
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+
+    assert set(first) <= set(client.deleted)
+
+
+def test_a_block_that_is_already_gone_when_checked_is_forgotten(db):
+    """"Not found" is not doubt - the block (and anything under it) is
+    already gone. It must be dropped from the list, not kept forever."""
+    client = DeletableNotion(blocks=[])
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
+    first = queries.get_notion_blocks(db, PAGE)
+
+    client._retrieve_error = _api_error("object_not_found")
+    client._delete_errors = {b: _api_error("object_not_found") for b in first}
     result = writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), PAGE)
 
     assert result["kept"] == 0
-    assert sorted(client.deleted) == sorted(first)
+    assert result["already_gone"] == len(first)
+    assert not set(first) & set(queries.get_notion_blocks(db, PAGE))
 
 
 def test_only_a_missing_block_counts_as_already_deleted(db):
@@ -1013,3 +1054,22 @@ def test_no_summary_means_no_extra_block(db):
 
     assert plan.summary is None
     assert not any(b["type"] == "callout" and "💡" in str(b) for b in writer.render_plan(plan))
+
+
+# --- the page id, written two ways ------------------------------------------
+
+def test_the_same_page_id_with_dashes_is_still_the_same_page(db):
+    """Notion shows a page id both as 32 characters and in the dashed
+    8-4-4-4-12 form. Pasting the other form into .env used to make the agent
+    lose its record of its own blocks - and then refuse to write the page."""
+    undashed = "11111111222233334444555555555555"
+    dashed = "11111111-2222-3333-4444-555555555555"
+    client = DeletableNotion(blocks=[])
+
+    writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), undashed)
+    first = queries.get_notion_blocks(db, undashed)
+
+    result = writer.write_plan(db, client, build_plan(db, _rhythm(), MONDAY), dashed)
+
+    assert result["deleted"] == len(first)            # recognised as its own
+    assert queries.get_notion_blocks(db, dashed) == queries.get_notion_blocks(db, undashed)
