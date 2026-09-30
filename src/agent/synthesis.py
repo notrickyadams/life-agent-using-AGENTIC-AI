@@ -97,6 +97,21 @@ def build_prompt(plan) -> str:
 # made an ordinary sentence read as a claim that something was overdue.
 _OVERDUE_WORDS = re.compile(r"\b(overdue|past due|late)\b", re.IGNORECASE)
 
+# Words too ordinary to prove a summary referred to one particular item.
+# The cutoff matters in both directions now that a failed check DISCARDS the
+# summary: too loose and a bad summary passes, too tight and a good one is
+# thrown away. "lab" is short but genuinely names an item, so length alone
+# cannot decide it - hence a stop-word list rather than a longer minimum.
+_COMMON_WORDS = frozenset({
+    # generic coursework nouns
+    "assignment", "assignments", "homework", "class", "classes", "course",
+    "lecture", "section", "quiz", "exam", "project", "report", "reading",
+    # ordinary English
+    "the", "and", "for", "you", "your", "are", "was", "not", "but", "its",
+    "has", "have", "this", "that", "with", "from", "into", "onto", "then",
+    "first", "next", "last", "today", "tomorrow", "week", "day", "time",
+})
+
 
 def check_covers_overdue(text: str, plan) -> tuple[bool, str]:
     """Check the one omission we have actually seen a model make.
@@ -122,11 +137,15 @@ def check_covers_overdue(text: str, plan) -> tuple[bool, str]:
     if claims_overdue:
         return True, ""
 
+    # A DISTINCTIVE word from the item itself. Ordinary ones are excluded:
+    # matching "lab" or "assignment" would let almost any sentence through,
+    # which is how a loose check quietly becomes no check at all.
     lowered = text.lower()
     for item in plan.overdue:
-        words = [w for w in (item.title or "").lower().split() if len(w) > 3]
-        words += [w for w in (item.course_name or "").lower().split() if len(w) > 3]
-        if any(word in lowered for word in words):
+        words = {w.strip(".,:;()") for w in (item.title or "").lower().split()}
+        words |= {w.strip(".,:;()") for w in (item.course_name or "").lower().split()}
+        distinctive = {w for w in words if len(w) >= 3 and w not in _COMMON_WORDS}
+        if any(re.search(rf"\b{re.escape(w)}\b", lowered) for w in distinctive):
             return True, ""
 
     titles = ", ".join(i.title for i in plan.overdue[:3])
@@ -172,7 +191,9 @@ def _synthesise_with_claude(prompt: str, conn=None, run_id: int | None = None) -
     if conn is not None and run_id is not None:
         from src.db import queries
 
-        queries.record_claude_call(conn, run_id)      # raises past the limit
+        # The day is counted in YOUR timezone, so "one a day" means one per
+        # day as you experience it, not per UTC day.
+        queries.record_claude_call(conn, run_id, timezone_name=config.SYNTHESIS_TIMEZONE)
 
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     try:
@@ -226,7 +247,17 @@ def synthesise(plan, backend: str | None = None, conn=None, run_id: int | None =
 
     complete, note = check_covers_overdue(text, plan)
     if not complete:
-        log.warning("synthesis (%s) looks incomplete: %s", backend, note)
+        # DISCARDED, not shown with a caveat underneath. This is the first
+        # thing read each morning, and a confident false statement -
+        # "Assignment 1 is overdue" about work due in nine days - is worse
+        # than silence: it sends you to do the wrong thing, with a reason
+        # attached. A footnote does not undo that; people read the sentence.
+        #
+        # The sections below are unaffected and stay correct, so nothing is
+        # lost but a paragraph that was wrong.
+        log.warning("synthesis (%s) DISCARDED: %s", backend, note)
+        return Summary(text="", backend=backend, complete=False,
+                       note=note, claude_calls=calls)
 
-    return Summary(text=text.strip(), backend=backend, complete=complete,
-                   note=note, claude_calls=calls)
+    return Summary(text=text.strip(), backend=backend, complete=True,
+                   note="", claude_calls=calls)

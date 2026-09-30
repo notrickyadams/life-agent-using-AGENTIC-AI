@@ -23,6 +23,7 @@ Check the file any time with:
     python -m src.rhythm.config
 """
 
+import re
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -68,7 +69,15 @@ class Day:
         so a themeless day simply never matches anything.
         """
         haystack = " ".join(t for t in texts if t).lower()
-        return [kw for kw in self.keywords if kw in haystack]
+        # A keyword must start a word. As a bare substring "cert" matches
+        # "Concert" and "oss" matches "Crossing", pulling in things that
+        # merely contain the letters. Requiring a WHOLE word is too strict
+        # the other way - "cert" is written precisely to catch
+        # "certification". Matching at a word start gets both right.
+        return [
+            kw for kw in self.keywords
+            if re.search(rf"(?<![a-z0-9]){re.escape(kw)}", haystack)
+        ]
 
 
 @dataclass(frozen=True)

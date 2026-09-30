@@ -95,6 +95,21 @@ SYNTHESIS_MODEL: str = os.getenv("SYNTHESIS_MODEL", "ollama").strip().lower()
 # A separate budget from a Claude Pro subscription, which includes no API use.
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
+# The timezone the one-call-a-day limit is counted in. Read from
+# rhythm.toml so it matches the day you actually live in; falls back to UTC
+# if that file cannot be read, since a cost limit must never fail open.
+def _synthesis_timezone() -> str:
+    try:
+        import tomllib
+
+        raw = tomllib.loads((REPO_ROOT / "rhythm.toml").read_text(encoding="utf-8"))
+        return (raw.get("settings", {}) or {}).get("timezone") or "UTC"
+    except Exception:  # noqa: BLE001
+        return "UTC"
+
+
+SYNTHESIS_TIMEZONE: str = _synthesis_timezone()
+
 # Which Claude model to use for that one call.
 ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5").strip()
 

@@ -220,3 +220,29 @@ def test_a_correct_file_is_still_accepted(tmp_path):
     """Guard against the validation becoming over-eager."""
     rhythm = load_rhythm(_write(tmp_path, FULL))
     assert rhythm.days["monday"].theme == "certification_study"
+
+
+# --- keywords match at a word start, not anywhere ---------------------------
+
+def test_a_keyword_must_start_a_word():
+    """As a bare substring, "cert" matches "Concert"."""
+    day = Day(name="monday", theme="study", keywords=("cert", "oss", "exam"))
+
+    assert day.matches("Concert tickets") == []
+    assert day.matches("Crossing the road") == []
+    assert day.matches("Texam") == []
+
+
+def test_a_keyword_still_matches_a_longer_word_it_starts():
+    """"cert" is written precisely to catch "certification" - requiring a
+    whole word would be too strict the other way."""
+    day = Day(name="monday", theme="study", keywords=("cert", "oss"))
+
+    assert day.matches("certification study") == ["cert"]
+    assert day.matches("OSS contribution") == ["oss"]
+
+
+def test_a_hyphenated_keyword_still_works():
+    day = Day(name="monday", theme="study", keywords=("cca-f",))
+
+    assert day.matches("CCA-F practice section") == ["cca-f"]

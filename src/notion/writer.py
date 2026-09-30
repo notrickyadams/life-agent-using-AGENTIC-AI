@@ -550,7 +550,7 @@ def write_plan(conn, client, plan, page_id: str | None = None,
 
 
 def _main() -> int:
-    parser = argparse.ArgumentParser(description="Notion writer - connection check (reads only, writes nothing)")
+    parser = argparse.ArgumentParser(description="Notion writer. --check and --preview read only; --write replaces the blocks this agent wrote.")
     parser.add_argument("--check", action="store_true", help="verify the token and the target page")
     parser.add_argument("--preview", action="store_true",
                         help="render today's plan to Notion blocks and print them; writes nothing")

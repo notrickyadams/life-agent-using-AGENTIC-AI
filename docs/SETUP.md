@@ -27,8 +27,8 @@ about a minute.
 
 **How you will find out:** the Notion page tells you, in red, at the top:
 
-    Google needs you to sign in again (calendar). Until you do, this page
-    will not update. Run: python -m src.run_daily
+    Google needs you to sign in again (calendar). Until you do, everything
+    below stays as it was at the time shown. Run: python -m src.run_daily
 
 A second red warning appears whenever the data is more than six hours old
 at the moment a run happens.
@@ -177,7 +177,8 @@ will run by itself each morning. Until then, this is "refresh my day".
     refresh.bat                          the same thing, double-clickable
     python -m src.run_daily              sync, plan, write to Notion
     python -m src.run_daily --dry-run    same, but writes nothing anywhere
-    python -m src.rhythm.today           sync and show today in the terminal
+    python -m src.rhythm.today           read Google and show today in the
+                                         terminal; never writes to Notion
     python -m src.notion.writer --check  is Notion reachable and safe to write
     python -m pytest                     run the tests
 

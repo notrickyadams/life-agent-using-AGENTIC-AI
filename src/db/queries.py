@@ -336,19 +336,57 @@ def count_claude_calls(conn: sqlite3.Connection, run_id: int) -> int:
     return 0 if row is None or row["n"] is None else row["n"]
 
 
-def record_claude_call(conn: sqlite3.Connection, run_id: int, max_per_run: int = 1) -> int:
-    """Record one Claude API call against this run. Returns the new total.
+def count_claude_calls_today(conn: sqlite3.Connection, timezone_name: str = "UTC") -> int:
+    """How many Claude API calls have been made today, across every run.
 
-    Raises RuntimeError past max_per_run. V1's rule is at most one call per
-    run, on already-organised data; this makes that a thing the code
-    enforces rather than a promise in a comment.
+    Per DAY, not per run. A per-run limit is no limit at all here: every
+    refresh.bat double-click, every scheduled run and every ad-hoc command
+    starts a new run and so a fresh allowance. CLAUDE.md asks for at most
+    one paid call a day, and that is a property of the day.
     """
-    current = count_claude_calls(conn, run_id)
-    if current >= max_per_run:
+    from zoneinfo import ZoneInfo
+
+    try:
+        zone = ZoneInfo(timezone_name)
+    except Exception:  # noqa: BLE001 - an unknown zone must not block the check
+        zone = timezone.utc
+
+    today = datetime.now(zone).date()
+    rows = conn.execute(
+        "SELECT started_at, claude_calls_made FROM runs WHERE claude_calls_made > 0"
+    ).fetchall()
+
+    total = 0
+    for row in rows:
+        try:
+            started = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+        if started.astimezone(zone).date() == today:
+            total += row["claude_calls_made"]
+    return total
+
+
+def record_claude_call(
+    conn: sqlite3.Connection,
+    run_id: int,
+    max_per_day: int = 1,
+    timezone_name: str = "UTC",
+) -> int:
+    """Record one Claude API call. Returns this run's new total.
+
+    Raises RuntimeError once the DAY's allowance is used. The limit is per
+    day, counted across every run, because that is what costs money - a
+    per-run limit would reset on every double-click.
+    """
+    already_today = count_claude_calls_today(conn, timezone_name)
+    if already_today >= max_per_day:
         raise RuntimeError(
-            f"refusing a {current + 1}th Claude API call in one run "
-            f"(limit {max_per_run}). Routine work belongs on the local model."
+            f"refusing a {already_today + 1}th Claude API call today "
+            f"(limit {max_per_day} per day). Today's summary has already been "
+            "written; routine work belongs on the local model."
         )
+    current = count_claude_calls(conn, run_id)
     conn.execute(
         "UPDATE runs SET claude_calls_made = ? WHERE run_id = ?", (current + 1, run_id)
     )

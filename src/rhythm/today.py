@@ -5,7 +5,7 @@ This is the "what's relevant today" logic from V1 step 2. It is entirely
 deterministic - plain rules over what the collectors stored, no AI of any
 kind. Steps 4 and 5 add intelligence on top of this; they do not replace it.
 
-The plan has four sections. The first three are MUTUALLY EXCLUSIVE, so an
+The plan has five sections. The first three are MUTUALLY EXCLUSIVE, so an
 item never appears twice:
 
     overdue    past its due date and still not done   (most urgent)
@@ -26,11 +26,13 @@ Rules applied before any of that:
     assignment is itself present, so a due date is not listed twice. The
     Classroom row wins because it carries the submission state.
 
-By default this syncs from Google first, so what you see is what Google has
-right now - not what it had the last time something ran. Every plan also
-states how old its data is, and says so loudly when that is stale.
+By default this reads Google first, so what you see is what Google has right
+now rather than what it had the last time something ran. It updates the
+local database and prints the plan - and nothing else. It does NOT write to
+Notion and does NOT write a summary, so it can never spend money. Use
+run_daily for the full pipeline.
 
-    python -m src.rhythm.today                    sync, then show today
+    python -m src.rhythm.today                    read Google, show today
     python -m src.rhythm.today --no-sync          show what is stored, no network
     python -m src.rhythm.today --date 2026-05-20  plan a specific date
 """
@@ -436,7 +438,17 @@ def build_plan(conn, rhythm: Rhythm, on: date | None = None) -> DayPlan:
         # earlier too, but it is over - it needs its time shown, not a word
         # that says it is still going.
         item.started_earlier = (
-            item.local_date is not None and item.local_date < on and item.spans(on)
+            item.local_date is not None
+            and item.local_date < on
+            and item.spans(on)
+            # ...and has not already finished. An event that ran until 01:00
+            # is not "ongoing" at 10:00 just because it ends on today's date.
+            and not (
+                planning_today
+                and item.local_end_time
+                and item.local_end_date == on
+                and item.local_end_time < now_local.strftime("%H:%M")
+            )
         )
 
         if item.spans(on):
@@ -554,7 +566,9 @@ def format_plan(plan: DayPlan) -> str:
 
 def _main() -> int:
     parser = argparse.ArgumentParser(
-        description="Show the day plan. Syncs from Google first so what you see is current."
+        description="Show the day plan in the terminal. Reads Google first so what you "
+                    "see is current. Never writes to Notion and never calls a paid API - "
+                    "use run_daily for that."
     )
     parser.add_argument("--date", help="plan for a specific date, e.g. 2026-05-20 (default: today)")
     parser.add_argument("--no-sync", action="store_true",
@@ -584,17 +598,28 @@ def _main() -> int:
     schema.init_db(conn)
     try:
         if not args.no_sync:
-            # Sync first, so the plan reflects Google as it is right now
-            # rather than as it was the last time anything ran. A source that
-            # fails is reported and the plan is still built from what is
-            # stored - a slightly old plan beats no plan.
-            from src.run_daily import COLLECTORS, run_pipeline
+            # Reads Google and updates the local database. Deliberately does
+            # NOT run the whole pipeline: this command shows you the day in
+            # the terminal, so it must not write to your Notion page, and it
+            # must not spend money on a summary. Running run_daily from here
+            # did all three, which is a lot to happen behind a command that
+            # says "show today".
+            from src.db import queries
+            from src.run_daily import COLLECTORS
 
-            results = run_pipeline(conn, COLLECTORS, allow_browser=True)
-            results.pop("_plan", None)
-            for name, outcome in results.items():
-                if not outcome.get("ok"):
-                    print(f"warning: {name} did not sync ({outcome.get('error')})")
+            run_id = queries.start_run(conn)
+            ok = {}
+            for name, collect in COLLECTORS.items():
+                try:
+                    queries.upsert_events(conn, collect(allow_browser=True))
+                    queries.mark_unseen_inactive(conn, name, queries.utc_now_iso())
+                    queries.record_source_synced(conn, run_id, name)
+                    ok[name] = True
+                except Exception as exc:  # noqa: BLE001 - one source must not stop the other
+                    ok[name] = False
+                    print(f"warning: {name} did not sync ({type(exc).__name__}: {exc})")
+            queries.finish_run(conn, run_id, calendar_ok=ok.get("calendar"),
+                               classroom_ok=ok.get("classroom"))
 
         plan = build_plan(conn, rhythm, on)
         print(format_plan(plan))

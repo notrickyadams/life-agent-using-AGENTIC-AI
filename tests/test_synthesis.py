@@ -156,17 +156,44 @@ def test_ollama_being_down_is_reported_not_silent(db, monkeypatch):
         synthesise(_busy_plan(db), backend="ollama")
 
 
-def test_an_incomplete_ollama_summary_is_flagged_but_still_returned(db, monkeypatch):
-    """Imperfect is still worth reading - as long as you are told."""
+def test_a_summary_that_fails_the_check_is_discarded_not_captioned(db, monkeypatch):
+    """A confident false sentence at the top of the page is worse than
+    silence - it sends you to do the wrong thing, with a reason attached,
+    and a footnote underneath does not undo that. The sections below stay
+    correct, so nothing is lost but a paragraph that was wrong."""
     monkeypatch.setattr("src.agent.local_model.is_available", lambda: True)
     monkeypatch.setattr("src.agent.local_model.generate",
                         lambda *a, **k: "Have a productive day studying.")
 
     summary = synthesise(_plan_with_overdue(db), backend="ollama")
 
-    assert summary.usable is True
+    assert summary.usable is False          # nothing reaches the page
+    assert summary.text == ""
     assert summary.complete is False
-    assert "Lab report 3" in summary.note
+    assert "Lab report 3" in summary.note   # the log still says why
+
+
+def test_an_invented_overdue_claim_is_also_discarded(db, monkeypatch):
+    monkeypatch.setattr("src.agent.local_model.is_available", lambda: True)
+    monkeypatch.setattr("src.agent.local_model.generate",
+                        lambda *a, **k: "The networks lecture is overdue.")
+
+    summary = synthesise(_busy_plan(db), backend="ollama")
+
+    assert summary.usable is False
+    assert "calls something overdue when nothing is" in summary.note
+
+
+def test_a_good_summary_is_returned_untouched(db, monkeypatch):
+    monkeypatch.setattr("src.agent.local_model.is_available", lambda: True)
+    monkeypatch.setattr("src.agent.local_model.generate",
+                        lambda *a, **k: "Start with the overdue Lab report 3.")
+
+    summary = synthesise(_plan_with_overdue(db), backend="ollama")
+
+    assert summary.usable is True
+    assert summary.complete is True
+    assert summary.note == ""
 
 
 # --- claude backend and the cost rule --------------------------------------

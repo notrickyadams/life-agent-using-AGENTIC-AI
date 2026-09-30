@@ -160,9 +160,38 @@ def test_a_second_claude_call_in_one_run_is_refused(db):
     assert queries.count_claude_calls(db, run_id) == 1
 
 
-def test_the_limit_is_per_run_not_global(db):
+def test_the_limit_is_per_day_not_per_run(db):
+    """A per-run limit is no limit: every refresh.bat double-click starts a
+    new run, so the allowance would reset each time."""
     first = queries.start_run(db)
     queries.record_claude_call(db, first)
 
     second = queries.start_run(db)
-    assert queries.record_claude_call(db, second) == 1
+    with pytest.raises(RuntimeError, match="today"):
+        queries.record_claude_call(db, second)
+
+
+def test_yesterdays_call_does_not_use_up_today(db):
+    old_run = queries.start_run(db)
+    queries.record_claude_call(db, old_run)
+    db.execute("UPDATE runs SET started_at = '2020-01-01T09:00:00Z' WHERE run_id = ?", (old_run,))
+    db.commit()
+
+    today_run = queries.start_run(db)
+    assert queries.record_claude_call(db, today_run) == 1
+
+
+def test_the_day_is_counted_in_your_timezone(db):
+    """One a day should mean one per day as you live it, not per UTC day."""
+    run_id = queries.start_run(db)
+    queries.record_claude_call(db, run_id, timezone_name="Africa/Cairo")
+
+    assert queries.count_claude_calls_today(db, "Africa/Cairo") == 1
+
+
+def test_an_unknown_timezone_falls_back_rather_than_failing_open(db):
+    run_id = queries.start_run(db)
+    queries.record_claude_call(db, run_id, timezone_name="Mars/Olympus")
+
+    with pytest.raises(RuntimeError):
+        queries.record_claude_call(db, queries.start_run(db), timezone_name="Mars/Olympus")

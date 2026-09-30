@@ -407,3 +407,21 @@ def test_a_model_tag_is_not_repeated_when_a_keyword_already_matched(db, monkeypa
     tagger.tag_plan(db, plan)
 
     assert plan.all_items()[0].label.count("exam") == 1
+
+
+@pytest.mark.parametrize("answer", [
+    "probably an assignment",
+    "maybe a lab",
+    "possibly exam",
+    "I think lab",
+    "it seems like a quiz",
+])
+def test_a_hedged_answer_yields_no_tag(answer):
+    """A hedge is the model saying it does not know. Storing the tag anyway
+    throws that away - the label then looks as confident as a sure one."""
+    assert parse_tag(answer) is None
+
+
+@pytest.mark.parametrize("answer", ["assignment", "lab", "Answer: quiz", "exam."])
+def test_a_plain_answer_is_still_accepted(answer):
+    assert parse_tag(answer) is not None

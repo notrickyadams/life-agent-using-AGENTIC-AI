@@ -71,19 +71,34 @@ today" is filtered through the day's theme from the start, not decided ad hoc
 by a model each run.
 
 ### Agent loop (the router)
-The one piece of actual "agent" logic in V1. For each item that needs
-processing:
+Sketched here as a single `loop.py`. **Built instead as two stages inside
+`run_daily.py`**, because the routing turned out to be a property of the
+stage rather than a decision to make per item:
 
 ```
-if task is routine (tag, dedupe, classify, filter-by-theme):
-    call local model (Ollama)
-else if task is the daily synthesis ("what matters today, in what order, why"):
-    call Claude API — once per run, on already-organized data
+stage 3  tag      every item -> the local model (Ollama). Free, so no
+                  reason to be selective.
+stage 4  summary  the whole plan, once -> whichever model SYNTHESIS_MODEL
+                  names. Default ollama (free); claude is opt-in and
+                  limited to ONE CALL PER DAY, counted across every run.
 ```
 
-This is the component most worth testing in isolation before wiring in real
-data — feed it fake items and confirm routine tasks never reach the Claude
-API call.
+There is no `loop.py` and no per-item routing decision. A stage knows which
+model it wants, so the "router" is which function gets called - a fact of
+the code, not a judgement made at runtime.
+
+The cost limit is per DAY, not per run. A per-run limit would reset on every
+`refresh.bat` double-click, which is no limit at all. It lives in
+`queries.record_claude_call()` and counts against the day in your own
+timezone.
+
+The summary is the only place a model is asked for judgement, and the only
+output that cannot be validated the way a closed tag vocabulary can. What
+IS checked is the one failure seen repeatedly on real data: a summary that
+invents overdue work, or omits work that is genuinely overdue. Either one
+gets the summary **discarded rather than captioned** - a confident false
+sentence at the top of the page is worse than no sentence, and a footnote
+saying "this may be incomplete" does not undo it.
 
 ### Notion writer
 Write-only in V1, into a **page** (not a database): one page rewritten each

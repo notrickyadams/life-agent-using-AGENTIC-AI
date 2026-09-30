@@ -64,6 +64,14 @@ MAX_ANSWER_WORDS = 4
 # worse than giving no answer at all.
 _NEGATIONS = re.compile(r"\b(not|no|isn't|aren't|never|neither|nor)\b")
 
+# A hedge is not an answer. "probably an assignment" is the model saying it
+# does not know, and storing the tag anyway throws that away - the label then
+# looks exactly as confident as one it was sure about.
+_HEDGES = re.compile(
+    r"\b(probably|maybe|perhaps|possibly|might|could|unsure|unclear|"
+    r"seems|appears|likely|guess|think|assume)\b"
+)
+
 SYSTEM_PROMPT = (
     "You label university coursework. You answer with exactly one word from "
     "the list you are given, and nothing else. No explanation, no punctuation, "
@@ -127,7 +135,9 @@ def parse_tag(answer: str) -> str | None:
     #    happens to contain a tag word. Reading a tag out of an echo would
     #    label items by their own titles - precisely the thing the model was
     #    brought in to get past.
-    if len(text.split()) <= MAX_ANSWER_WORDS and not _NEGATIONS.search(text):
+    if (len(text.split()) <= MAX_ANSWER_WORDS
+            and not _NEGATIONS.search(text)
+            and not _HEDGES.search(text)):
         found = {tag for tag in ALLOWED_TAGS if re.search(rf"\b{re.escape(tag)}\b", text)}
         if len(found) == 1:
             return found.pop()

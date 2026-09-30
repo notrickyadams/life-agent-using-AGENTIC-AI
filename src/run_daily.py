@@ -241,11 +241,22 @@ def run_pipeline(
             )
             plan.summary = summary
             paid_calls = summary.claude_calls
-            synthesis_outcome.update(ok=True, backend=summary.backend, complete=summary.complete)
+            # A discarded summary is the check WORKING, not the run breaking:
+            # the plan and the page are both correct, and the summary is
+            # optional by design. So ok stays None - skipped, with the reason
+            # recorded - rather than False, which would make a healthy run
+            # report as failed every day and train you to ignore it.
+            synthesis_outcome.update(
+                ok=True if summary.complete else None,
+                backend=summary.backend,
+                complete=summary.complete,
+                error=None if summary.complete else f"discarded: {summary.note}",
+            )
             results["summary"] = synthesis_outcome
-            log.info("summary: %s wrote %d characters%s",
-                     summary.backend, len(summary.text),
-                     "" if summary.complete else f" (incomplete: {summary.note})")
+            if summary.complete:
+                log.info("summary: %s wrote %d characters", summary.backend, len(summary.text))
+            else:
+                log.warning("summary: nothing written - %s", summary.note)
         except synthesis.SynthesisError as exc:
             synthesis_outcome["error"] = str(exc).splitlines()[0]
             log.warning("summary skipped: %s", exc)
@@ -328,10 +339,9 @@ def run_pipeline(
             calendar_ok=results.get("calendar", {}).get("ok"),
             classroom_ok=results.get("classroom", {}).get("ok"),
             notion_ok=notion_outcome["ok"],
-            # Counted from what actually happened, not asserted. Nothing
-            # calls Claude before step 5, so this reads 0 today - but it
-            # will keep telling the truth once step 5 exists.
-            # Counted from what actually happened, not asserted.
+            # Counted from what actually happened, not asserted. Reads 0
+            # while SYNTHESIS_MODEL is ollama, and keeps telling the truth
+            # if that changes.
             claude_calls_made=queries.count_claude_calls(conn, run_id) or paid_calls,
             plan_items=plan_outcome["items"],
             error="; ".join(errors) or None,
@@ -340,7 +350,7 @@ def run_pipeline(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Daily sync: Google Calendar + Classroom -> SQLite")
+    parser = argparse.ArgumentParser(description="The daily run: read Google, work out the day, label it, summarise it, and write it to your Notion page.")
     parser.add_argument("--dry-run", action="store_true", help="fetch, parse and plan, but write nothing")
     parser.add_argument("--verbose", action="store_true", help="debug-level logging")
     parser.add_argument("--quiet", action="store_true", help="do not print the plan (the log still has it)")
