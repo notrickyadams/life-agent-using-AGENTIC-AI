@@ -423,6 +423,15 @@ def count_claude_calls_today(conn: sqlite3.Connection, timezone_name: str = "UTC
     return total
 
 
+class ClaudeDailyLimitReached(RuntimeError):
+    """Today's paid Claude calls are used up.
+
+    Its own type so callers can tell "the limit did its job" apart from a
+    real failure - the first is expected on every second run of a day, and
+    must not be reported as something broken.
+    """
+
+
 def record_claude_call(
     conn: sqlite3.Connection,
     run_id: int,
@@ -431,16 +440,15 @@ def record_claude_call(
 ) -> int:
     """Record one Claude API call. Returns this run's new total.
 
-    Raises RuntimeError once the DAY's allowance is used. The limit is per
-    day, counted across every run, because that is what costs money - a
-    per-run limit would reset on every double-click.
+    Raises ClaudeDailyLimitReached once the DAY's allowance is used. The
+    limit is per day, counted across every run, because that is what costs
+    money - a per-run limit would reset on every double-click.
     """
     already_today = count_claude_calls_today(conn, timezone_name)
     if already_today >= max_per_day:
-        raise RuntimeError(
-            f"refusing a {already_today + 1}th Claude API call today "
-            f"(limit {max_per_day} per day). Today's summary has already been "
-            "written; routine work belongs on the local model."
+        raise ClaudeDailyLimitReached(
+            f"refusing another Claude API call today: {already_today} already made "
+            f"(limit {max_per_day} per day). Routine work belongs on the local model."
         )
     current = count_claude_calls(conn, run_id)
     conn.execute(

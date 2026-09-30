@@ -327,6 +327,41 @@ def test_an_ordinary_collector_failure_is_also_surfaced(db, monkeypatch):
     assert "sign in" not in warning            # a different problem, different words
 
 
+def _capture_notion_warnings(monkeypatch) -> dict:
+    """Turn Notion on with a fake writer that records the page's warnings."""
+    monkeypatch.setattr(run_daily.config, "NOTION_API_KEY", "ntn_fake")
+    monkeypatch.setattr(run_daily.config, "NOTION_PARENT_ID", "page")
+    monkeypatch.setattr(run_daily.notion_writer, "get_client", lambda: object())
+    captured = {}
+
+    def fake_write(conn, client, plan, page_id=None, warnings=None):
+        captured["warnings"] = warnings
+        return {"written": 1, "deleted": 0, "already_gone": 0,
+                "page_id": "page", "url": "u", "other_blocks": 0}
+
+    monkeypatch.setattr(run_daily.notion_writer, "write_plan", fake_write)
+    return captured
+
+
+def test_a_failed_step_that_reads_nothing_is_described_accurately(db, monkeypatch):
+    """The page used to say "This run could not read summary, so anything
+    from there may be out of date" - words for a data source, about a step
+    that reads nothing. It must name the step and say the lists are fine."""
+    captured = _capture_notion_warnings(monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("the model exploded")
+
+    monkeypatch.setattr(run_daily.synthesis, "synthesise", boom)
+
+    run_daily.run_pipeline(db, {"classroom": lambda **_: [_urgent_row()]})
+
+    warning = " ".join(captured["warnings"])
+    assert "could not read" not in warning
+    assert "summary" in warning
+    assert "logs/agent.log" in warning
+
+
 def test_a_healthy_run_sends_no_warnings(db, monkeypatch):
     monkeypatch.setattr(run_daily.config, "NOTION_API_KEY", "ntn_fake")
     monkeypatch.setattr(run_daily.config, "NOTION_PARENT_ID", "page")
@@ -429,6 +464,34 @@ def test_a_dry_run_still_gets_a_free_summary(db, monkeypatch):
 
     assert results["summary"]["ok"] is True
     assert results["summary"]["backend"] == "ollama"
+
+
+def test_a_second_paid_call_today_is_skipped_not_failed(db, monkeypatch):
+    """Double-clicking refresh.bat after the morning run used to mark the
+    summary FAILED, exit 1, and put a red "could not read summary" warning
+    on the page - for the one-a-day limit doing exactly its job."""
+    monkeypatch.setattr(run_daily.config, "SYNTHESIS_MODEL", "claude")
+    monkeypatch.setattr(run_daily.config, "ANTHROPIC_API_KEY", "sk-ant-fake")
+    captured = _capture_notion_warnings(monkeypatch)
+
+    import sys, types
+    module = types.ModuleType("anthropic")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("a second paid call was made today")
+
+    module.Anthropic = must_not_run
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    morning = queries.start_run(db)
+    queries.record_claude_call(db, morning, timezone_name=run_daily.config.SYNTHESIS_TIMEZONE)
+
+    results = run_daily.run_pipeline(db, {"classroom": lambda **_: [_urgent_row()]})
+
+    assert results["summary"]["ok"] is None                 # skipped, not failed
+    assert "already been used" in results["summary"]["error"]
+    assert captured["warnings"] == []                       # nothing red on the page
+    assert queries.get_latest_run(db)["error"] is None
 
 
 def test_a_summary_failure_never_fails_the_run(db, monkeypatch):

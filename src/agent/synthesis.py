@@ -28,8 +28,9 @@ WHY THIS STEP NEEDS A GUARDRAIL
     It catches the one mistake we have actually seen.
 
 THE COST RULE
-    At most one paid call per run, enforced in queries.record_claude_call()
-    rather than trusted to this file. Switching backend cannot change that.
+    At most one paid call per DAY (in your timezone), enforced in
+    queries.record_claude_call() rather than trusted to this file. Switching
+    backend cannot change that, and a call that cannot be counted is refused.
 """
 
 import logging
@@ -171,11 +172,14 @@ def _synthesise_with_ollama(prompt: str) -> tuple[str, int]:
 
 
 def _synthesise_with_claude(prompt: str, conn=None, run_id: int | None = None) -> tuple[str, int]:
-    """Ask the Anthropic API. The one paid call in V1.
+    """Ask the Anthropic API. The one paid call a day in V1.
 
     Recorded through queries.record_claude_call BEFORE the request, which
-    refuses a second call in the same run. Recording first matters: a call
-    that fails still cost money and still used the budget for this run.
+    refuses a second call on the same day. Recording first matters: a call
+    that fails still cost money and still used the day's budget.
+
+    Without a database connection and run id there is nothing to count the
+    call against, so it is refused rather than made uncounted.
     """
     if not config.ANTHROPIC_API_KEY:
         raise SynthesisError(
@@ -188,12 +192,27 @@ def _synthesise_with_claude(prompt: str, conn=None, run_id: int | None = None) -
             "The anthropic package is not installed. Run: pip install -r requirements.txt"
         ) from exc
 
-    if conn is not None and run_id is not None:
-        from src.db import queries
+    if conn is None or run_id is None:
+        # The limit is enforced in the database. No database, no limit - and
+        # a cost limit must never fail open.
+        raise SynthesisError(
+            "Refusing a paid Claude call that cannot be counted against the "
+            "one-a-day limit (no database connection or run id was given)."
+        )
 
+    from src.db import queries
+
+    try:
         # The day is counted in YOUR timezone, so "one a day" means one per
         # day as you experience it, not per UTC day.
         queries.record_claude_call(conn, run_id, timezone_name=config.SYNTHESIS_TIMEZONE)
+    except queries.ClaudeDailyLimitReached as exc:
+        # The limit doing its job - e.g. refresh.bat after the morning run.
+        # A SynthesisError, so the run reports the summary as skipped.
+        raise SynthesisError(
+            "Today's one Claude call has already been used, so this run has no "
+            "summary. The plan is complete without it."
+        ) from exc
 
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     try:

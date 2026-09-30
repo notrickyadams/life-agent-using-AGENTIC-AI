@@ -235,23 +235,43 @@ def test_a_claude_call_is_recorded_against_the_run(db, monkeypatch):
     assert "overdue" in summary.text
 
 
-def test_a_second_claude_call_in_one_run_is_refused(db, monkeypatch):
-    """The cost rule lives in the database, not in a promise."""
+def test_a_second_claude_call_today_is_refused(db, monkeypatch):
+    """The cost rule lives in the database, not in a promise. Refused as a
+    SynthesisError - the summary is skipped, which is the rule working, not
+    the run breaking."""
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-fake")
     run_id = queries.start_run(db)
-    queries.record_claude_call(db, run_id)          # the day's one call
+    queries.record_claude_call(db, run_id, timezone_name=config.SYNTHESIS_TIMEZONE)  # the day's one call
 
     import sys, types
     module = types.ModuleType("anthropic")
 
     def must_not_run(*a, **k):
-        raise AssertionError("a second paid call was made in one run")
+        raise AssertionError("a second paid call was made today")
 
     module.Anthropic = must_not_run
     monkeypatch.setitem(sys.modules, "anthropic", module)
 
-    with pytest.raises(RuntimeError, match="refusing"):
+    with pytest.raises(SynthesisError, match="already been used"):
         synthesise(_plan_with_overdue(db), backend="claude", conn=db, run_id=run_id)
+
+
+def test_a_claude_call_that_cannot_be_counted_is_refused(db, monkeypatch):
+    """With no database there is no way to enforce one-a-day, so the call
+    is refused rather than made uncounted. A cost limit must not fail open."""
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-fake")
+
+    import sys, types
+    module = types.ModuleType("anthropic")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("an uncounted paid call was made")
+
+    module.Anthropic = must_not_run
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    with pytest.raises(SynthesisError, match="counted"):
+        synthesise(_plan_with_overdue(db), backend="claude")
 
 
 def test_the_call_is_recorded_even_if_the_request_then_fails(db, monkeypatch):

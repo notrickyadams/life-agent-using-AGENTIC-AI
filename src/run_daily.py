@@ -10,7 +10,8 @@ Stages, in order:
 
 Which model writes the summary is a setting, SYNTHESIS_MODEL, defaulting to
 the free local one. Whichever is chosen, at most ONE paid call happens per
-run - and a dry run never makes a paid call at all.
+day (a second run that day skips the summary) - and a dry run never makes a
+paid call at all.
 
 Each stage is isolated: a collector failing does not stop the other, and
 neither stops the plan being built from whatever is already stored.
@@ -291,10 +292,21 @@ def run_pipeline(
             )
         failed = [n for n, r in stages.items()
                   if r.get("ok") is False and not r.get("needs_signin")]
-        if failed:
+        # Two kinds of failure, told apart because they mean different
+        # things to the reader. A SOURCE that failed means stale data. A
+        # step that reads nothing (labels, summary) failing only means that
+        # step is missing - the lists are still right.
+        unread = [n for n in failed if n in collectors]
+        broken_steps = [n for n in failed if n not in collectors]
+        if unread:
             warnings.append(
-                f"This run could not read {', '.join(failed)}, so anything from "
+                f"This run could not read {', '.join(unread)}, so anything from "
                 "there may be out of date. See logs/agent.log."
+            )
+        if broken_steps:
+            warnings.append(
+                f"The {' and '.join(broken_steps)} step failed this run, so it is "
+                "missing below. The lists themselves are unaffected. See logs/agent.log."
             )
 
         try:

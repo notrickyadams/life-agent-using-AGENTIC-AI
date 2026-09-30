@@ -87,7 +87,7 @@ CALENDAR_DAYS_AHEAD: int = int(os.getenv("CALENDAR_DAYS_AHEAD", "30"))
 #   none    no summary at all; the plan alone is still a plan
 #
 # Defaults to ollama so the pipeline costs nothing until you decide otherwise.
-# Whichever is chosen, at most ONE paid call is ever made per run - the limit
+# Whichever is chosen, at most ONE paid call is ever made per day - the limit
 # lives in queries.record_claude_call(), not in this setting.
 SYNTHESIS_MODEL: str = os.getenv("SYNTHESIS_MODEL", "ollama").strip().lower()
 
