@@ -475,7 +475,7 @@ def test_synthesis_off_means_no_summary_at_all(db, monkeypatch):
 
 # --- --if-stale, the gate that makes a login trigger cheap ------------------
 
-def test_if_stale_does_nothing_when_the_data_is_fresh(db, monkeypatch):
+def test_if_stale_does_nothing_when_the_data_is_fresh(db, monkeypatch, fake_credentials):
     """The login trigger fires every time you sign in; without this gate
     that would mean a full sync each time."""
     _mark_fresh(db)
@@ -489,7 +489,33 @@ def test_if_stale_does_nothing_when_the_data_is_fresh(db, monkeypatch):
     assert run_daily.main(["--if-stale", "6"]) == 0
 
 
-def test_if_stale_runs_when_the_data_is_old(db, monkeypatch):
+def test_main_logs_to_the_configured_folder_not_the_real_one(db, monkeypatch, fake_credentials):
+    """main() writes its log under config.LOG_DIR, which the tests point at a
+    temporary folder. This used to append test runs to the real
+    logs/agent.log."""
+    _mark_fresh(db)
+    monkeypatch.setattr(run_daily.schema, "connect", lambda *a, **k: db)
+
+    run_daily.main(["--if-stale", "6"])
+
+    log_file = run_daily.config.LOG_DIR / "agent.log"
+    assert log_file.exists()
+    assert "nothing to do" in log_file.read_text(encoding="utf-8")
+
+
+def test_main_refuses_to_start_without_a_credentials_file(db, monkeypatch):
+    """No fake_credentials here: the configuration check must stop the run
+    (exit code 2) before any collector is touched."""
+    def must_not_run(**_):
+        raise AssertionError("a collector ran despite a configuration problem")
+
+    monkeypatch.setattr(run_daily, "COLLECTORS", {"calendar": must_not_run})
+    monkeypatch.setattr(run_daily.schema, "connect", lambda *a, **k: db)
+
+    assert run_daily.main(["--quiet"]) == 2
+
+
+def test_if_stale_runs_when_the_data_is_old(db, monkeypatch, fake_credentials):
     """A laptop shut overnight must refresh when it opens."""
     _mark_fresh(db, at="2026-01-01T00:00:00Z")
     ran = []
@@ -503,7 +529,7 @@ def test_if_stale_runs_when_the_data_is_old(db, monkeypatch):
     assert ran == [True]
 
 
-def test_if_stale_runs_when_nothing_has_ever_synced(db, monkeypatch):
+def test_if_stale_runs_when_nothing_has_ever_synced(db, monkeypatch, fake_credentials):
     """No history is not the same as fresh."""
     ran = []
 

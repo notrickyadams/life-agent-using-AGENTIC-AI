@@ -1,0 +1,46 @@
+# A fixed rhythm for the tests - see tests/conftest.py.
+#
+# Deliberately a COPY, not a link to the real rhythm.toml: editing your week
+# must never change what the tests see. Tests that need a particular rhythm
+# still write their own; this is only what load_rhythm() returns when a test
+# does not say.
+
+[settings]
+timezone = "Africa/Cairo"
+due_soon_days = 3
+show_overdue = true
+
+[days.monday]
+theme = "certification_study"
+focus = ""
+keywords = ["cca-f", "cert", "exam"]
+
+[days.tuesday]
+theme = "open_source"
+focus = ""
+keywords = ["oss", "open source", "github", "pull request"]
+
+[days.wednesday]
+theme = ""
+focus = ""
+keywords = []
+
+[days.thursday]
+theme = ""
+focus = ""
+keywords = []
+
+[days.friday]
+theme = ""
+focus = ""
+keywords = []
+
+[days.saturday]
+theme = ""
+focus = ""
+keywords = []
+
+[days.sunday]
+theme = ""
+focus = ""
+keywords = []

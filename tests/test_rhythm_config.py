@@ -4,6 +4,7 @@ from datetime import date
 
 import pytest
 
+from src import config
 from src.rhythm import config as rhythm_config
 from src.rhythm.config import Day, RhythmError, load_rhythm
 
@@ -168,8 +169,13 @@ def test_all_problems_are_reported_together(tmp_path):
 # --- the real file ----------------------------------------------------------
 
 def test_the_projects_own_rhythm_file_is_valid():
-    """Guards against committing a broken rhythm.toml."""
-    rhythm = load_rhythm()
+    """Guards against committing a broken rhythm.toml.
+
+    The one test that reads the REAL file, on purpose - so the path is given
+    explicitly. load_rhythm() with no argument reads the test copy in
+    tests/fixtures (see conftest.py).
+    """
+    rhythm = load_rhythm(config.REPO_ROOT / "rhythm.toml")
     assert rhythm.timezone
     assert set(rhythm.days) == set(rhythm_config.WEEKDAYS)
 
